@@ -537,13 +537,13 @@ int process_insn(struct insn* insn, void* params)
 
     if (nulls != 1)
     {
-        printk("insn %x %d\n", (unsigned int) insn->kaddr, (unsigned int) insn->length); // *
+//        printk("insn %x %d\n", (unsigned int) insn->kaddr, (unsigned int) insn->length); // *
         
         if ( (insn_is_mem_read(insn) || insn_is_mem_write(insn)) 
           && is_tracked_memory_op(insn) 
           && !insn_has_fs_gs_prefixes(insn))
         {
-            printk("insn_is_mem_read / insn_is_mem_write\n");
+//            printk("insn_is_mem_read / insn_is_mem_write\n");
             if (func->offsets_len < CHUNK_SIZE)
             {
                 func->offsets[func->offsets_len] = (unsigned long) insn->kaddr - (unsigned long) func->addr;
