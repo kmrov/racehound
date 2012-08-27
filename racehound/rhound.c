@@ -73,6 +73,8 @@ static int bp_reset_allowed = 0;
 
 #define BP_TIMER_INTERVAL (HZ / 2) /* 0.5 sec expressed in jiffies */
 
+#define ADDR_CHANGE_TIMER_INTERVAL (HZ * 10) /* change address every 10 sec */
+
 /* Fires each BP_TIMER_INTERVAL jiffies (or more), resets the sw bp if 
  * needed. */
 // TODO: prove the timer cannot be armed when this module is about to 
@@ -97,6 +99,170 @@ static struct mutex *ptext_mutex = NULL;
 static void * (*do_text_poke)(void *addr, const void *opcode, size_t len) = 
     NULL;
 /* ====================================================================== */
+
+
+/* Checks if the instruction has addressing method (type) E and its Mod R/M 
+ * expression refers to memory.
+ *
+ * [NB] CMPXCHG, SETcc, etc. also have type E and will be reported by this 
+ * function as such. To distinguish them from other type E instructions, use
+ * is_*_cmpxchg() and the like. */
+static int
+is_insn_type_e(struct insn *insn)
+{
+	insn_attr_t *attr = &insn->attr;
+	u8 modrm = insn->modrm.bytes[0];
+	
+	return ((attr->addr_method1 == INAT_AMETHOD_E || 
+		attr->addr_method2 == INAT_AMETHOD_E) &&
+		X86_MODRM_MOD(modrm) != 3);
+}
+
+static int
+is_insn_xlat(struct insn *insn)
+{
+	u8 *opcode = insn->opcode.bytes;
+	
+	/* XLAT: D7 */
+	return (opcode[0] == 0xd7);
+}
+
+static int
+is_insn_direct_offset_mov(struct insn *insn)
+{
+	u8 *opcode = insn->opcode.bytes;
+	
+	/* Direct memory offset MOVs: A0-A3 */
+	return (opcode[0] >= 0xa0 && opcode[0] <= 0xa3);
+}
+
+/* Opcode: FF/2 */
+static int
+is_insn_call_near_indirect(struct insn *insn)
+{
+	return (insn->opcode.bytes[0] == 0xff && 
+		X86_MODRM_REG(insn->modrm.bytes[0]) == 2);
+}
+
+/* Opcode: FF/4 */
+static int
+is_insn_jump_near_indirect(struct insn *insn)
+{
+	return (insn->opcode.bytes[0] == 0xff && 
+		X86_MODRM_REG(insn->modrm.bytes[0]) == 4);
+}
+
+/* Opcodes: FF/3 or 9A */
+static int
+is_insn_call_far(struct insn *insn)
+{
+	u8 opcode = insn->opcode.bytes[0];
+	u8 modrm = insn->modrm.bytes[0];
+	
+	return (opcode == 0x9a || 
+		(opcode == 0xff && X86_MODRM_REG(modrm) == 3));
+}
+
+/* Opcodes: FF/5 or EA */
+static int
+is_insn_jump_far(struct insn *insn)
+{
+	u8 opcode = insn->opcode.bytes[0];
+	u8 modrm = insn->modrm.bytes[0];
+	
+	return (opcode == 0xea || 
+		(opcode == 0xff && X86_MODRM_REG(modrm) == 5));
+}
+
+static int
+is_insn_cmpxchg8b_16b(struct insn *insn)
+{
+	u8 *opcode = insn->opcode.bytes;
+	u8 modrm = insn->modrm.bytes[0];
+	
+	/* CMPXCHG8B/CMPXCHG16B: 0F C7 /1 */
+	return (opcode[0] == 0x0f && opcode[1] == 0xc7 &&
+		X86_MODRM_REG(modrm) == 1);
+}
+
+static int
+is_insn_type_x(struct insn *insn)
+{
+	insn_attr_t *attr = &insn->attr;
+	return (attr->addr_method1 == INAT_AMETHOD_X ||
+		attr->addr_method2 == INAT_AMETHOD_X);
+}
+
+static int
+is_insn_type_y(struct insn *insn)
+{
+	insn_attr_t *attr = &insn->attr;
+	return (attr->addr_method1 == INAT_AMETHOD_Y || 
+		attr->addr_method2 == INAT_AMETHOD_Y);
+}
+
+static int
+is_insn_movbe(struct insn *insn)
+{
+	u8 *opcode = insn->opcode.bytes;
+	
+	/* We need to check the prefix to distinguish MOVBE from CRC32 insn,
+	 * they have the same opcode. */
+	if (insn_has_prefix(insn, 0xf2))
+		return 0;
+	
+	/* MOVBE: 0F 38 F0 and 0F 38 F1 */
+	return (opcode[0] == 0x0f && opcode[1] == 0x38 &&
+		(opcode[2] == 0xf0 || opcode[2] == 0xf1));
+}
+
+/* Check if the memory addressing expression uses %rsp/%esp. */
+static int
+expr_uses_sp(struct insn *insn)
+{
+	unsigned int expr_reg_mask = insn_reg_mask_for_expr(insn);
+	return (expr_reg_mask & X86_REG_MASK(INAT_REG_CODE_SP));
+} 
+
+static int 
+is_tracked_memory_op(struct insn *insn)
+{
+	/* Filter out indirect jumps and calls first, we do not track these
+	 * memory accesses. */
+	if (is_insn_call_near_indirect(insn) || 
+	    is_insn_jump_near_indirect(insn) ||
+	    is_insn_call_far(insn) || is_insn_jump_far(insn))
+		return 0;
+	
+	if (insn_is_noop(insn))
+		return 0;
+	
+	/* Locked updates should always be tracked, because they are 
+	 * memory barriers among other things.
+	 * "lock add $0, (%esp)" is used, for example, when "mfence" is not
+	 * available. Note that this locked instruction addresses the stack
+	 * so we must not filter out locked updates even if they refer to
+	 * the stack. 
+	 * 
+	 * [NB] I/O instructions accessing memory should always be tracked 
+	 * too but this is fulfilled automatically because these are string 
+	 * operations. */
+	if (insn_is_locked_op(insn))
+		return 1;
+	
+	if (is_insn_type_e(insn) || is_insn_movbe(insn) || 
+	    is_insn_cmpxchg8b_16b(insn)) {
+	    	return (/* process_stack_accesses || */ !expr_uses_sp(insn));
+	}
+	
+	if (is_insn_type_x(insn) || is_insn_type_y(insn))
+		return 1;
+	
+	if (is_insn_direct_offset_mov(insn) || is_insn_xlat(insn))
+		return 1;
+
+	return 0;
+}
 
 static unsigned int
 get_operand_size_from_insn_attr(struct insn *insn, unsigned char opnd_type)
@@ -224,7 +390,7 @@ long decode_and_get_addr(void *insn_addr, struct pt_regs *regs)
     
 //    printk("insn %x %d\n", (unsigned int) insn.kaddr, (unsigned int) insn.length); // *
         
-    if (insn_is_mem_read(&insn) || insn_is_mem_write(&insn))
+    if ((insn_is_mem_read(&insn) || insn_is_mem_write(&insn)) && is_tracked_memory_op(&insn))
     {
 //        printk("insn_is_mem_read / insn_is_mem_write\n");
         insn_get_length(&insn);  // 64bit?
@@ -371,11 +537,13 @@ int process_insn(struct insn* insn, void* params)
 
     if (nulls != 1)
     {
-        //printk("insn %x %d\n", (unsigned int) insn->kaddr, (unsigned int) insn->length); // *
+        printk("insn %x %d\n", (unsigned int) insn->kaddr, (unsigned int) insn->length); // *
         
-        if ((insn_is_mem_read(insn) || insn_is_mem_write(insn)) && !insn_has_fs_gs_prefixes(insn))
+        if ( (insn_is_mem_read(insn) || insn_is_mem_write(insn)) 
+          && is_tracked_memory_op(insn) 
+          && !insn_has_fs_gs_prefixes(insn))
         {
-            //printk("insn_is_mem_read / insn_is_mem_write\n");
+            printk("insn_is_mem_read / insn_is_mem_write\n");
             if (func->offsets_len < CHUNK_SIZE)
             {
                 func->offsets[func->offsets_len] = (unsigned long) insn->kaddr - (unsigned long) func->addr;
