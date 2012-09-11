@@ -59,6 +59,40 @@ struct func_with_offsets {
 };
 
 struct list_head funcs_with_offsets;
+
+struct swbp_work 
+{
+    struct work_struct wrk;
+    struct sw_breakpoint *bp;
+};
+
+struct sw_breakpoint 
+{
+    u8 *addr;
+    int reset_allowed;
+    int set;
+    u8 orig_byte;
+    
+    struct list_head lst;
+};
+
+struct list_head sw_breakpoints;
+
+void racehound_add_breakpoint(u8 *addr)
+{
+    // TODO: check result, check if already exists
+    struct sw_breakpoint *swbp = kzalloc(sizeof(struct sw_breakpoint), GFP_KERNEL);
+    swbp->addr = addr;
+    swbp->reset_allowed = 1;
+    swbp->set = 0;
+    list_add_tail(&swbp->lst, &sw_breakpoints);
+}
+
+void racehound_remove_breakpoint(unsigned int offset)
+{
+    // TODO: racefinder_unset_breakpoint   
+}
+
 /* ====================================================================== */
 
 /* Offset of the insn in 'hello_plus' to set the sw bp to. */
@@ -578,15 +612,17 @@ racefinder_unset_breakpoint(void)
 static void 
 work_fn_set_soft_bp(struct work_struct *work)
 {
+    struct swbp_work *swbp_wrk = (struct swbp_work *) work;
+    struct sw_breakpoint *bp = swbp_wrk->bp;
     mutex_lock(ptext_mutex);
-    if (bp_addr != NULL && !bp_set) {
-        bp_orig_byte = *bp_addr;
-        do_text_poke(bp_addr, &soft_bp, 1);
+    if ((bp->addr != NULL) && !bp->set) {
+        bp->orig_byte = *(bp->addr);
+        do_text_poke(bp->addr, &soft_bp, 1);
         //*bp_addr = 0xcc;
-        bp_set = 1;
+        bp->set = 1;
     }
     mutex_unlock(ptext_mutex);
-    kfree(work);
+    kfree(swbp_wrk);
 }
 
 /*static void 
@@ -600,28 +636,33 @@ static void
 bp_timer_fn(unsigned long arg)
 {
     int to_reset = 0;
-    struct work_struct *work = NULL;
+    struct swbp_work *work = NULL;
+    struct sw_breakpoint *bp;
     
-    to_reset = bp_reset_allowed;
     smp_rmb();
     
-    if (!to_reset)
-        return;
+    list_for_each_entry(bp, &sw_breakpoints, lst) 
+    {
+        to_reset = bp->reset_allowed;
+        if (to_reset)
+        {
+            /* [NB] If you call text_poke() / do_text_poke() directly and do 
+             * not care about text_mutex, you do not need to use the workqueue
+             * here.
+             * Same if CONFIG_DEBUG_SET_MODULE_RONX=n and you are writing the 
+             * opcodes directly rather than with text_poke. */
     
-    /* [NB] If you call text_poke() / do_text_poke() directly and do 
-     * not care about text_mutex, you do not need to use the workqueue
-     * here.
-     * Same if CONFIG_DEBUG_SET_MODULE_RONX=n and you are writing the 
-     * opcodes directly rather than with text_poke. */
-    
-    work = kzalloc(sizeof(*work), GFP_ATOMIC);
-    if (work != NULL) {
-        INIT_WORK(work, work_fn_set_soft_bp);
-        queue_work(wq, work);
-    }
-    else {
-        pr_info("bp_timer_fn(): out of memory");
-    }
+            work = kzalloc(sizeof(*work), GFP_ATOMIC);
+            if (work != NULL) {
+                INIT_WORK(&work->wrk, work_fn_set_soft_bp);
+                work->bp = bp;
+                queue_work(wq, &work->wrk);
+            }
+            else {
+                pr_info("bp_timer_fn(): out of memory");
+            }
+        }
+    }    
     
     mod_timer(&bp_timer, jiffies + BP_TIMER_INTERVAL);
 }
@@ -631,6 +672,7 @@ static int rfinder_detector_notifier_call(struct notifier_block *nb,
 {
     struct kedr_tmod_function *pos;
     struct func_with_offsets *func;
+    struct sw_breakpoint *bp;
     int ret = 0/*, i = 0*/;
     struct module* mod = (struct module *)vmod;
     BUG_ON(mod == NULL);
@@ -680,10 +722,10 @@ static int rfinder_detector_notifier_call(struct notifier_block *nb,
                     }
                     */
                     //printk("strcmp = %d\n", strcmp(pos->name, "hello_plus"));
-                    if (strcmp(pos->name, target_function) == 0)
+                    if ( (strcmp(pos->name, "hello_plus") == 0) )
                     {
                         mutex_lock(ptext_mutex);
-                        bp_addr = (u8 *)func->addr + bp_offset;
+                        racehound_add_breakpoint((u8 *)func->addr + 0x11);
                         mutex_unlock(ptext_mutex);
                         //racefinder_set_breakpoint("hello_plus", 0x8);
                     }
@@ -700,7 +742,6 @@ static int rfinder_detector_notifier_call(struct notifier_block *nb,
                 }*/
                 
                 smp_wmb();
-                bp_reset_allowed = 1;
                 bp_timer_fn(0); 
             }
         break;
@@ -709,7 +750,10 @@ static int rfinder_detector_notifier_call(struct notifier_block *nb,
             if(mod == target_module)
             {
                 smp_wmb();
-                bp_reset_allowed = 0;
+                list_for_each_entry(bp, &sw_breakpoints, lst)
+                {
+                    bp->reset_allowed = 0;
+                }
                 del_timer_sync(&bp_timer);
                 
                 // No need to unset the sw breakpoint, the 
@@ -740,53 +784,41 @@ static int
 on_soft_bp_triggered(struct die_args *args)
 {
     int ret = NOTIFY_DONE;
-        
+    struct sw_breakpoint *bp;
     /* [???] 
      * How should we protect the access to 'bp_addr'? A spinlock in 
      * addition to text_mutex? */
-     
-    /* Check if it is someone else's breakpoint first. */
-    if ((unsigned long)bp_addr + 1 != args->regs->ip) {
-        printk(KERN_INFO "DIE_INT3, CPU=%d, task_struct=%p\n", 
-            smp_processor_id(), current);
-        goto out;
-    }
     
-    ret = NOTIFY_STOP; /* our breakpoint, we will handle it */
+    list_for_each_entry(bp, &sw_breakpoints, lst)
+    {
+        if ((bp->addr + 1) == (u8*) args->regs->ip)
+        {
+            ret = NOTIFY_STOP; /* our breakpoint, we will handle it */
     
-    //<>
-    printk(KERN_INFO 
-        "[Begin] Our software bp at %p; CPU=%d, task_struct=%p\n", 
-        bp_addr, smp_processor_id(), current);
-    //<>
+            //<>
+            printk(KERN_INFO 
+                "[Begin] Our software bp at %p; CPU=%d, task_struct=%p\n", 
+                bp->addr, smp_processor_id(), current);
+            //<>
     
-    /*work = kzalloc(sizeof(*work), GFP_ATOMIC);
-    if (work != NULL) {
-        INIT_WORK(work, work_fn_clear_soft_bp);
-        queue_work(wq, work);
-    }
-    else {
-        pr_info("on_soft_bp_triggered: out of memory");
-    }*/
-    
-    //*bp_addr = bp_orig_byte;
-    
-    /* Another ugly thing. We should lock text_mutex but we are in 
-     * atomic context... */
-    do_text_poke(bp_addr, &bp_orig_byte, 1);
-    args->regs->ip -= 1;
-    bp_set = 0;
-    
-    // Run the engine...
-    decode_and_get_addr((void *)args->regs->ip, args->regs);
-        
-    //<>
-    printk(KERN_INFO 
-        "[End] Our software bp at %p; CPU=%d, task_struct=%p\n", 
-        bp_addr, smp_processor_id(), current);
-    //<>
+            /* Another ugly thing. We should lock text_mutex but we are in 
+             * atomic context... */
+            do_text_poke(bp->addr, &bp->orig_byte, 1);
+            args->regs->ip -= 1;
+            bp->set = 0;
+            
+            // Run the engine...
+            decode_and_get_addr((void *)args->regs->ip, args->regs);
+                
+            //<>
+            printk(KERN_INFO 
+                "[End] Our software bp at %p; CPU=%d, task_struct=%p\n", 
+                bp->addr, smp_processor_id(), current);
+            //<>
 
-out:
+        }
+    }
+    
     return ret;
 }
 
@@ -836,6 +868,8 @@ static int __init racefinder_module_init(void)
     bp_timer.function = bp_timer_fn;
     bp_timer.data = 0;
     bp_timer.expires = 0; /* to be set by mod_timer() later */
+    
+    INIT_LIST_HEAD(&sw_breakpoints);
     
     /* ----------------------- */
     /* AN UGLY HACK. DO NOT DO THIS UNLESS THERE IS NO OTHER CHOICE. */
