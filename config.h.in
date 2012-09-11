@@ -1,0 +1,6 @@
+/* The path where the user-mode helper scripts are located by default */
+#define RH_UM_HELPER_PATH "@RH_UM_HELPER_PATH@"
+
+/* Name and version of the package */
+#define RH_PACKAGE_NAME "@RH_PACKAGE_NAME@"
+#define RH_PACKAGE_VERSION "@RH_PACKAGE_VERSION@"

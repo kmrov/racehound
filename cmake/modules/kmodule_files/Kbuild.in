@@ -1,0 +1,3 @@
+ccflags-y := @kmodule_flags@
+
+obj-m := try_compile.o

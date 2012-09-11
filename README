@@ -1,0 +1,10 @@
+﻿RaceHound
+--------------
+RaceHound project provides the tools for detect data races in Linux
+kernel modules (device drivers, file system modules,
+etc.) in runtime.
+
+Currently, RaceHound is intended for systems with x86 architecture, 
+both 32- and 64-bit.
+
+Project site: http://github.com/winnukem/racehound

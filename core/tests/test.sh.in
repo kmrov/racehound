@@ -1,0 +1,61 @@
+#!/bin/sh
+
+core_module="@CMAKE_BINARY_DIR@/core/race_hound.ko"
+
+target_name="@module_name@"
+target_module="@CMAKE_CURRENT_BINARY_DIR@/${target_name}.ko"
+
+target_function="hello_plus"
+# TODO: Need to be configured somehow
+bp_offset=17
+
+insmod_command=`PATH=$PATH:/sbin which insmod`
+rmmod_command=`PATH=$PATH:/sbin which rmmod`
+
+# Prepare to test
+if ! ${insmod_command} ${core_module} target_name=${target_name} \
+		target_function=${target_function} bp_offset=${bp_offset}; then
+	printf "Failed to load core module into kernel.\n"
+	exit 1
+fi
+
+if ! ${insmod_command} ${target_module}; then
+	printf "Failed to load target module into kernel.\n"
+	${rmmod_command} ${core_module}
+	exit 1
+fi
+
+# Test itself.
+# 
+# To repeated operations run concurrently: one in backgroud and one in
+# the current thread.
+@CMAKE_CURRENT_SOURCE_DIR@/plus.sh&
+
+# Store pid for wait after test.
+plus_pid=$!
+
+@CMAKE_CURRENT_SOURCE_DIR@/minus.sh
+
+# TODO: check whether race is found
+test_result=0 # As if OK
+
+# Wait until background process is finished before finalize test
+wait ${plus_pid}
+
+if ! ${rmmod_command} ${target_module}; then
+	printf "Failed to unload target module.\n"
+	# Core module cannot be unloaded if target one is failed to unload.
+	exit 1
+fi
+
+if ! ${rmmod_command} ${core_module}; then
+	printf "Failed to unload core module.\n"
+	exit 1
+fi
+
+if ! test "${test_result}" -eq 0; then
+	printf "Errors occures while testing.\n"
+	exit 1
+fi
+
+# Success
