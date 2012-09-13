@@ -85,6 +85,7 @@ void racehound_add_breakpoint(u8 *addr)
     swbp->addr = addr;
     swbp->reset_allowed = 1;
     swbp->set = 0;
+    INIT_LIST_HEAD(&swbp->lst);
     list_add_tail(&swbp->lst, &sw_breakpoints);
 }
 
@@ -702,9 +703,9 @@ static int rfinder_detector_notifier_call(struct notifier_block *nb,
                            (unsigned long) pos->addr + (unsigned long) pos->text_size,
                            (unsigned long) pos->text_size);*/
                            
-                    func = kmalloc(sizeof(*func), GFP_KERNEL);
+                    func = kzalloc(sizeof(*func), GFP_KERNEL);
                     
-                    func->func_name = kmalloc(strlen(pos->name), GFP_KERNEL);
+                    func->func_name = kzalloc(strlen(pos->name), GFP_KERNEL);
                     strcpy(func->func_name, pos->name);
                     func->addr = pos->addr;
                     func->offsets_len = 0;
