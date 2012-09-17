@@ -72,9 +72,9 @@ if test -z "${SECTIONS_DATA}"; then
 fi
 
 # Pass the collected data to the kernel-mode part of our system via debugfs.
-TMP_DIR="@KEDR_INSTALL_PREFIX_TEMP@/sections"
+TMP_DIR="@RH_PREFIX_TEMP@/sections"
 DEBUGFS_DIR="${TMP_DIR}/debug"
-SECTIONS_FILE="${DEBUGFS_DIR}/@KEDR_MEM_CORE_DEBUGFS_DIR@/@KEDR_MEM_CORE_SECTIONS_FILE@"
+SECTIONS_FILE="${DEBUGFS_DIR}/rhound/data"
 
 rm -rf "${TMP_DIR}"
 mkdir -p "${TMP_DIR}"

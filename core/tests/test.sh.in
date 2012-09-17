@@ -14,7 +14,8 @@ rmmod_command=`PATH=$PATH:/sbin which rmmod`
 
 # Prepare to test
 if ! ${insmod_command} ${core_module} target_name=${target_name} \
-		target_function=${target_function} bp_offset=${bp_offset}; then
+		target_function=${target_function} bp_offset=${bp_offset} \
+		rh_get_sections_path="@CMAKE_BINARY_DIR@/core/um_helpers/rh_test_get_sections.sh"; then
 	printf "Failed to load core module into kernel.\n"
 	exit 1
 fi

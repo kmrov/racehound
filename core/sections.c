@@ -11,15 +11,19 @@
 #include <asm/uaccess.h>
 
 #include "sections.h"
+
+#include "config.h"
 /* ====================================================================== */
 
 /* The path to a helper script that should obtain the addresses of the 
- * sections from sysfs.
- *
- * TODO: in a production-ready system, make the path to the helper
- * configured at build time rather than hard-coded like this. */
-#define KEDR_HELPER_SCRIPT_PATH "/usr/bin/kedr_get_sections.sh"
+ * sections from sysfs. */
+#define RH_GET_SECTIONS_PATH RH_UM_HELPER_PATH "/rh_get_sections.sh"
 /* ====================================================================== */
+
+/* It is usefull for tests to redefine path to get_sections helper.
+ * This parameter is pretended for that purpose. */
+static char* rh_get_sections_path = RH_GET_SECTIONS_PATH;
+module_param(rh_get_sections_path, charp, S_IRUGO);
 
 /* The file in debugfs to be used by the user-mode helper to pass the 
  * collected data to our module. */
@@ -127,7 +131,7 @@ kedr_run_um_helper(char *target_name)
 	int ret = 0;
 	unsigned int ret_status = 0;
 	
-	char *argv[] = {"/bin/sh", KEDR_HELPER_SCRIPT_PATH, NULL, NULL};
+	char *argv[] = {"/bin/sh", rh_get_sections_path, NULL, NULL};
 	static char *envp[] = {
 		"HOME=/",
 		"TERM=linux",
@@ -145,22 +149,19 @@ kedr_run_um_helper(char *target_name)
 	ret_status = (unsigned int)ret & 0xff;
 	if (ret_status != 0) {
 		pr_warning("[sample] Failed to execute %s, status is 0x%x\n",
-			KEDR_HELPER_SCRIPT_PATH,
-			ret_status);
+			rh_get_sections_path, ret_status);
 		return -EINVAL;
 	}
 	
 	ret >>= 8;
 	if (ret != 0) {
 		if (ret == 127) 
-			pr_info("[sample] " KEDR_HELPER_SCRIPT_PATH
-				" is missing.\n");
+			pr_info("[sample] %s is missing.\n", rh_get_sections_path);
 		else 
 			pr_info("[sample] "
 			"The helper failed, error code: %d. "
-			"See the comments in " KEDR_HELPER_SCRIPT_PATH 
-			" for the description of this error code.\n", 
-				ret);
+			"See the comments in %s for the description of this error code.\n",
+			ret, rh_get_sections_path);
 		return -EINVAL;
 	}
 	

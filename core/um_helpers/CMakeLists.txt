@@ -16,3 +16,13 @@ set(RH_UM_HELPERS
 install(PROGRAMS ${RH_UM_HELPERS} 
 	DESTINATION ${RH_INSTALL_PREFIX_EXEC})
 ########################################################################
+
+# Same script but for using while testing.
+
+rh_load_test_prefixes()
+
+configure_file (
+	"${CMAKE_CURRENT_SOURCE_DIR}/rh_get_sections.sh.in"
+	"${CMAKE_CURRENT_BINARY_DIR}/rh_test_get_sections.sh"
+	@ONLY
+)
