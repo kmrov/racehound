@@ -55,7 +55,7 @@ static int hello_init(void)
         return -EINVAL;
     }
 
-    printk("&balance: %x\n", (unsigned long) &balance);
+    printk("&balance: %lx\n", (unsigned long) &balance);
     return 0;
 }
 

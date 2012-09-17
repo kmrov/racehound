@@ -28,6 +28,8 @@
 #include "functions.h"
 #include "bp.h"
 
+#include <linux/uaccess.h>
+
 MODULE_LICENSE("GPL");
 
 static char* target_name = "hello";
@@ -40,6 +42,10 @@ static struct module* target_module = NULL;
 
 struct dentry *debugfs_dir_dentry = NULL;
 const char *debugfs_dir_name = "rhound";
+
+/* Counter for races found */
+struct dentry *race_counter_file = NULL;
+static atomic_t race_counter = ATOMIC_INIT(0);
 
 struct workqueue_struct *wq;
 
@@ -145,158 +151,158 @@ static void * (*do_text_poke)(void *addr, const void *opcode, size_t len) =
 static int
 is_insn_type_e(struct insn *insn)
 {
-	insn_attr_t *attr = &insn->attr;
-	u8 modrm = insn->modrm.bytes[0];
-	
-	return ((attr->addr_method1 == INAT_AMETHOD_E || 
-		attr->addr_method2 == INAT_AMETHOD_E) &&
-		X86_MODRM_MOD(modrm) != 3);
+    insn_attr_t *attr = &insn->attr;
+    u8 modrm = insn->modrm.bytes[0];
+    
+    return ((attr->addr_method1 == INAT_AMETHOD_E || 
+        attr->addr_method2 == INAT_AMETHOD_E) &&
+        X86_MODRM_MOD(modrm) != 3);
 }
 
 static int
 is_insn_xlat(struct insn *insn)
 {
-	u8 *opcode = insn->opcode.bytes;
-	
-	/* XLAT: D7 */
-	return (opcode[0] == 0xd7);
+    u8 *opcode = insn->opcode.bytes;
+    
+    /* XLAT: D7 */
+    return (opcode[0] == 0xd7);
 }
 
 static int
 is_insn_direct_offset_mov(struct insn *insn)
 {
-	u8 *opcode = insn->opcode.bytes;
-	
-	/* Direct memory offset MOVs: A0-A3 */
-	return (opcode[0] >= 0xa0 && opcode[0] <= 0xa3);
+    u8 *opcode = insn->opcode.bytes;
+    
+    /* Direct memory offset MOVs: A0-A3 */
+    return (opcode[0] >= 0xa0 && opcode[0] <= 0xa3);
 }
 
 /* Opcode: FF/2 */
 static int
 is_insn_call_near_indirect(struct insn *insn)
 {
-	return (insn->opcode.bytes[0] == 0xff && 
-		X86_MODRM_REG(insn->modrm.bytes[0]) == 2);
+    return (insn->opcode.bytes[0] == 0xff && 
+        X86_MODRM_REG(insn->modrm.bytes[0]) == 2);
 }
 
 /* Opcode: FF/4 */
 static int
 is_insn_jump_near_indirect(struct insn *insn)
 {
-	return (insn->opcode.bytes[0] == 0xff && 
-		X86_MODRM_REG(insn->modrm.bytes[0]) == 4);
+    return (insn->opcode.bytes[0] == 0xff && 
+        X86_MODRM_REG(insn->modrm.bytes[0]) == 4);
 }
 
 /* Opcodes: FF/3 or 9A */
 static int
 is_insn_call_far(struct insn *insn)
 {
-	u8 opcode = insn->opcode.bytes[0];
-	u8 modrm = insn->modrm.bytes[0];
-	
-	return (opcode == 0x9a || 
-		(opcode == 0xff && X86_MODRM_REG(modrm) == 3));
+    u8 opcode = insn->opcode.bytes[0];
+    u8 modrm = insn->modrm.bytes[0];
+    
+    return (opcode == 0x9a || 
+        (opcode == 0xff && X86_MODRM_REG(modrm) == 3));
 }
 
 /* Opcodes: FF/5 or EA */
 static int
 is_insn_jump_far(struct insn *insn)
 {
-	u8 opcode = insn->opcode.bytes[0];
-	u8 modrm = insn->modrm.bytes[0];
-	
-	return (opcode == 0xea || 
-		(opcode == 0xff && X86_MODRM_REG(modrm) == 5));
+    u8 opcode = insn->opcode.bytes[0];
+    u8 modrm = insn->modrm.bytes[0];
+    
+    return (opcode == 0xea || 
+        (opcode == 0xff && X86_MODRM_REG(modrm) == 5));
 }
 
 static int
 is_insn_cmpxchg8b_16b(struct insn *insn)
 {
-	u8 *opcode = insn->opcode.bytes;
-	u8 modrm = insn->modrm.bytes[0];
-	
-	/* CMPXCHG8B/CMPXCHG16B: 0F C7 /1 */
-	return (opcode[0] == 0x0f && opcode[1] == 0xc7 &&
-		X86_MODRM_REG(modrm) == 1);
+    u8 *opcode = insn->opcode.bytes;
+    u8 modrm = insn->modrm.bytes[0];
+    
+    /* CMPXCHG8B/CMPXCHG16B: 0F C7 /1 */
+    return (opcode[0] == 0x0f && opcode[1] == 0xc7 &&
+        X86_MODRM_REG(modrm) == 1);
 }
 
 static int
 is_insn_type_x(struct insn *insn)
 {
-	insn_attr_t *attr = &insn->attr;
-	return (attr->addr_method1 == INAT_AMETHOD_X ||
-		attr->addr_method2 == INAT_AMETHOD_X);
+    insn_attr_t *attr = &insn->attr;
+    return (attr->addr_method1 == INAT_AMETHOD_X ||
+        attr->addr_method2 == INAT_AMETHOD_X);
 }
 
 static int
 is_insn_type_y(struct insn *insn)
 {
-	insn_attr_t *attr = &insn->attr;
-	return (attr->addr_method1 == INAT_AMETHOD_Y || 
-		attr->addr_method2 == INAT_AMETHOD_Y);
+    insn_attr_t *attr = &insn->attr;
+    return (attr->addr_method1 == INAT_AMETHOD_Y || 
+        attr->addr_method2 == INAT_AMETHOD_Y);
 }
 
 static int
 is_insn_movbe(struct insn *insn)
 {
-	u8 *opcode = insn->opcode.bytes;
-	
-	/* We need to check the prefix to distinguish MOVBE from CRC32 insn,
-	 * they have the same opcode. */
-	if (insn_has_prefix(insn, 0xf2))
-		return 0;
-	
-	/* MOVBE: 0F 38 F0 and 0F 38 F1 */
-	return (opcode[0] == 0x0f && opcode[1] == 0x38 &&
-		(opcode[2] == 0xf0 || opcode[2] == 0xf1));
+    u8 *opcode = insn->opcode.bytes;
+    
+    /* We need to check the prefix to distinguish MOVBE from CRC32 insn,
+     * they have the same opcode. */
+    if (insn_has_prefix(insn, 0xf2))
+        return 0;
+    
+    /* MOVBE: 0F 38 F0 and 0F 38 F1 */
+    return (opcode[0] == 0x0f && opcode[1] == 0x38 &&
+        (opcode[2] == 0xf0 || opcode[2] == 0xf1));
 }
 
 /* Check if the memory addressing expression uses %rsp/%esp. */
 static int
 expr_uses_sp(struct insn *insn)
 {
-	unsigned int expr_reg_mask = insn_reg_mask_for_expr(insn);
-	return (expr_reg_mask & X86_REG_MASK(INAT_REG_CODE_SP));
+    unsigned int expr_reg_mask = insn_reg_mask_for_expr(insn);
+    return (expr_reg_mask & X86_REG_MASK(INAT_REG_CODE_SP));
 } 
 
 static int 
 is_tracked_memory_op(struct insn *insn)
 {
-	/* Filter out indirect jumps and calls first, we do not track these
-	 * memory accesses. */
-	if (is_insn_call_near_indirect(insn) || 
-	    is_insn_jump_near_indirect(insn) ||
-	    is_insn_call_far(insn) || is_insn_jump_far(insn))
-		return 0;
-	
-	if (insn_is_noop(insn))
-		return 0;
-	
-	/* Locked updates should always be tracked, because they are 
-	 * memory barriers among other things.
-	 * "lock add $0, (%esp)" is used, for example, when "mfence" is not
-	 * available. Note that this locked instruction addresses the stack
-	 * so we must not filter out locked updates even if they refer to
-	 * the stack. 
-	 * 
-	 * [NB] I/O instructions accessing memory should always be tracked 
-	 * too but this is fulfilled automatically because these are string 
-	 * operations. */
-	if (insn_is_locked_op(insn))
-		return 1;
-	
-	if (is_insn_type_e(insn) || is_insn_movbe(insn) || 
-	    is_insn_cmpxchg8b_16b(insn)) {
-	    	return (/* process_stack_accesses || */ !expr_uses_sp(insn));
-	}
-	
-	if (is_insn_type_x(insn) || is_insn_type_y(insn))
-		return 1;
-	
-	if (is_insn_direct_offset_mov(insn) || is_insn_xlat(insn))
-		return 1;
+    /* Filter out indirect jumps and calls first, we do not track these
+     * memory accesses. */
+    if (is_insn_call_near_indirect(insn) || 
+        is_insn_jump_near_indirect(insn) ||
+        is_insn_call_far(insn) || is_insn_jump_far(insn))
+        return 0;
+    
+    if (insn_is_noop(insn))
+        return 0;
+    
+    /* Locked updates should always be tracked, because they are 
+     * memory barriers among other things.
+     * "lock add $0, (%esp)" is used, for example, when "mfence" is not
+     * available. Note that this locked instruction addresses the stack
+     * so we must not filter out locked updates even if they refer to
+     * the stack. 
+     * 
+     * [NB] I/O instructions accessing memory should always be tracked 
+     * too but this is fulfilled automatically because these are string 
+     * operations. */
+    if (insn_is_locked_op(insn))
+        return 1;
+    
+    if (is_insn_type_e(insn) || is_insn_movbe(insn) || 
+        is_insn_cmpxchg8b_16b(insn)) {
+            return (/* process_stack_accesses || */ !expr_uses_sp(insn));
+    }
+    
+    if (is_insn_type_x(insn) || is_insn_type_y(insn))
+        return 1;
+    
+    if (is_insn_direct_offset_mov(insn) || is_insn_xlat(insn))
+        return 1;
 
-	return 0;
+    return 0;
 }
 
 static unsigned int
@@ -510,6 +516,8 @@ long decode_and_get_addr(void *insn_addr, struct pt_regs *regs)
             (void *)ea, (unsigned long)val, (unsigned long)newval, 
             (void *)regs->ip, size,
             smp_processor_id(), current);
+            
+            atomic_inc(&race_counter);
         }
         
          racefinder_changed = 0;
@@ -861,6 +869,60 @@ static struct notifier_block die_nb = {
     .priority = 0, /* perhaps, we don't need the maximum priority */
 };
 
+static int race_counter_file_open(struct inode *inode, struct file *filp)
+{
+    if (filp->f_mode & FMODE_READ) {
+        char* str;
+        int len;
+        int value = atomic_read(&race_counter);
+        
+        len = snprintf(NULL, 0, "%d\n", value);
+        
+        str = kmalloc(len + 1, GFP_KERNEL);
+        
+        if(str == NULL) return -ENOMEM;
+        
+        snprintf(str, len + 1, "%d\n", value);
+        
+        filp->private_data = str;
+    }
+    return nonseekable_open(inode, filp);
+}
+
+static ssize_t race_counter_file_read(struct file *filp, char __user *buf,
+    size_t count, loff_t *f_pos)
+{
+    char* str = filp->private_data;
+    int size = strlen(str);
+    
+    if((*f_pos < 0) || (*f_pos > size)) return -EINVAL;
+    if(*f_pos == size) return 0;// eof
+    //If need, correct 'count'
+    if(count + *f_pos > size)
+        count = size - *f_pos;
+
+    if(copy_to_user(buf, str + *f_pos, count) != 0)
+        return -EFAULT;
+
+    *f_pos += count;
+    return count;
+}
+
+static int race_counter_file_release(struct inode* inode, struct file* filp)
+{
+    kfree(filp->private_data);
+    return 0;
+}
+
+//TODO: Write as reset counter.
+
+struct file_operations race_counter_file_ops = {
+    .owner = THIS_MODULE,
+    .open = race_counter_file_open,
+    .read = race_counter_file_read,
+    .release = race_counter_file_release,
+};
+
 static int __init racefinder_module_init(void)
 {
     int ret = 0;
@@ -915,21 +977,32 @@ static int __init racefinder_module_init(void)
         goto out;
     }
     
+    race_counter_file = debugfs_create_file("race_count", S_IRUGO,
+        debugfs_dir_dentry, NULL, &race_counter_file_ops);
+    if(race_counter_file == NULL)
+    {
+        pr_err("Failed to create race counter file in debugfs.");
+        goto out_rmdir;
+    }
+
     ret = kedr_init_section_subsystem(debugfs_dir_dentry);
     if (ret != 0)
-        goto out_rmdir;
+        goto out_rmcounter;
     
     ret = kedr_init_function_subsystem();
     if (ret != 0) {
         printk("Error occured in kedr_init_function_subsystem(). Code: %d\n",
             ret);
-        goto out_rmdir;
+        goto out_rmsection;
     }
     
     return 0;
-    
-out_rmdir:
+
+out_rmsection:    
     kedr_cleanup_section_subsystem();
+out_rmcounter:
+    debugfs_remove(race_counter_file);
+out_rmdir:
     debugfs_remove(debugfs_dir_dentry);
 out:
     //<>
@@ -949,6 +1022,7 @@ static void __exit racefinder_module_exit(void)
 
     kedr_cleanup_function_subsystem();
     kedr_cleanup_section_subsystem();
+    debugfs_remove(race_counter_file);
     debugfs_remove(debugfs_dir_dentry);
     
     /* Just in case */
