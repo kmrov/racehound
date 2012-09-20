@@ -7,7 +7,7 @@ target_module="@CMAKE_CURRENT_BINARY_DIR@/${target_name}.ko"
 
 target_function="hello_plus"
 # TODO: Need to be configured somehow
-bp_offset=17
+bp_offset="0x11"
 
 insmod_command=`PATH=$PATH:/sbin which insmod`
 rmmod_command=`PATH=$PATH:/sbin which rmmod`
@@ -41,9 +41,7 @@ if ! ${insmod_command} ${target_module}; then
 	exit 1
 fi
 
-hex_offset=`echo "obase=16; ${bp_offset}" | bc`
-
-echo "${target_function}+0x${hex_offset}" > $DEBUGFS_DIR/rhound/breakpoints
+echo "${target_function}+${bp_offset}" > $DEBUGFS_DIR/rhound/breakpoints
 
 # Test itself.
 # 
