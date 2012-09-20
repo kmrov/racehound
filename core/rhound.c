@@ -47,6 +47,8 @@ const char *debugfs_dir_name = "rhound";
 struct dentry *race_counter_file = NULL;
 static atomic_t race_counter = ATOMIC_INIT(0);
 
+struct dentry *bp_file = NULL;
+
 struct workqueue_struct *wq;
 
 int racefinder_changed = 0;
@@ -75,6 +77,8 @@ struct swbp_work
 struct sw_breakpoint 
 {
     u8 *addr;
+    char *func_name;
+    unsigned int offset;
     int reset_allowed;
     int set;
     u8 orig_byte;
@@ -83,22 +87,6 @@ struct sw_breakpoint
 };
 
 struct list_head sw_breakpoints;
-
-void racehound_add_breakpoint(u8 *addr)
-{
-    // TODO: check result, check if already exists
-    struct sw_breakpoint *swbp = kzalloc(sizeof(struct sw_breakpoint), GFP_KERNEL);
-    swbp->addr = addr;
-    swbp->reset_allowed = 1;
-    swbp->set = 0;
-    INIT_LIST_HEAD(&swbp->lst);
-    list_add_tail(&swbp->lst, &sw_breakpoints);
-}
-
-void racehound_remove_breakpoint(unsigned int offset)
-{
-    // TODO: racefinder_unset_breakpoint   
-}
 
 /* ====================================================================== */
 
@@ -140,6 +128,43 @@ static struct mutex *ptext_mutex = NULL;
 static void * (*do_text_poke)(void *addr, const void *opcode, size_t len) = 
     NULL;
 /* ====================================================================== */
+
+
+void racehound_add_breakpoint(u8 *addr);
+
+int racehound_add_breakpoint_fn(char *func_name, unsigned int offset)
+{
+    struct func_with_offsets *pos;
+    int found = 0;
+    list_for_each_entry(pos, &funcs_with_offsets, lst) 
+    {
+        if ( (strcmp(pos->func_name, func_name) == 0) )
+        {
+            racehound_add_breakpoint((u8 *)pos->addr + offset);
+            found = 1;
+        }
+    }
+    return !found;
+}
+
+void racehound_add_breakpoint(u8 *addr)
+{
+    // TODO: check result, check if already exists
+    struct sw_breakpoint *swbp = kzalloc(sizeof(struct sw_breakpoint), GFP_KERNEL);
+    swbp->addr = addr;
+    swbp->reset_allowed = 1;
+    swbp->set = 0;
+    INIT_LIST_HEAD(&swbp->lst);
+    mutex_lock(ptext_mutex);
+    list_add_tail(&swbp->lst, &sw_breakpoints);
+    mutex_unlock(ptext_mutex);
+}
+
+void racehound_remove_breakpoint(unsigned int offset)
+{
+    // TODO: racefinder_unset_breakpoint   
+}
+
 
 
 /* Checks if the instruction has addressing method (type) E and its Mod R/M 
@@ -702,9 +727,7 @@ static int rfinder_detector_notifier_call(struct notifier_block *nb,
                         module_name(mod), ret);
                     goto cleanup_func_and_fail;
                 }
-                
-                INIT_LIST_HEAD(&funcs_with_offsets);
-                
+                                
                 list_for_each_entry(pos, &tmod_funcs, list) {
                     /*printk("function %s: addr: %lu end: %lu size: %lu ================== \n", 
                            pos->name, (unsigned long) pos->addr, 
@@ -731,13 +754,13 @@ static int rfinder_detector_notifier_call(struct notifier_block *nb,
                     }
                     */
                     //printk("strcmp = %d\n", strcmp(pos->name, "hello_plus"));
-                    if ( (strcmp(pos->name, "hello_plus") == 0) )
-                    {
-                        mutex_lock(ptext_mutex);
-                        racehound_add_breakpoint((u8 *)func->addr + 0x11);
-                        mutex_unlock(ptext_mutex);
+//                    if ( (strcmp(pos->name, "hello_plus") == 0) )
+//                    {
+//                        mutex_lock(ptext_mutex);
+//                        racehound_add_breakpoint((u8 *)func->addr + 0x11);
+//                        mutex_unlock(ptext_mutex);
                         //racefinder_set_breakpoint("hello_plus", 0x8);
-                    }
+//                    }
                     
                     
                 }
@@ -923,6 +946,88 @@ struct file_operations race_counter_file_ops = {
     .release = race_counter_file_release,
 };
 
+static int bp_file_open(struct inode *inode, struct file *filp)
+{
+    if (filp->f_mode & FMODE_READ) {
+        char* str = NULL;
+        
+        filp->private_data = str;
+    }
+    return nonseekable_open(inode, filp);
+}
+
+static ssize_t bp_file_read(struct file *filp, char __user *buf,
+    size_t count, loff_t *f_pos)
+{
+    return count;
+}
+
+static ssize_t bp_file_write(struct file *filp, const char __user *buf,
+    size_t count, loff_t *f_pos)
+{
+    char *str = NULL, *p = NULL, *func_name = NULL, *offset = NULL;
+    unsigned int offset_val = 0, found = 0;
+    if(count == 0)
+    {
+        return -EINVAL;
+    }
+
+    if(*f_pos != 0)
+    {
+        return -EINVAL;
+    }
+    str = kmalloc(count + 1, GFP_KERNEL);
+    if(str == NULL)
+    {
+        return -ENOMEM;
+    }
+
+    if(copy_from_user(str, buf, count) != 0)
+    {
+        kfree(str);
+        return -EFAULT;
+    }
+
+    str[count] = '\0';
+    if(str[count - 1] == '\n') str[count - 1] = '\0';
+
+    for (p = str; *p; p++)
+    {
+        if (*p == '+')
+        {
+            func_name = str;
+            offset = p + 1;
+            *p = '\0';
+            sscanf(offset, "%x", &offset_val);
+            printk("func_name: %s offset_val: %x\n", func_name, offset_val);
+            if (racehound_add_breakpoint_fn(func_name, offset_val))
+            {
+                printk("function %s not found.\n", func_name);
+            }
+            found = 1;
+        }
+    }
+    
+    if (!found) 
+    {
+        kfree(str);
+        return -EINVAL;
+    }
+    
+    kfree(str);
+    return count;
+}
+
+
+
+struct file_operations bp_file_ops = {
+    .owner = THIS_MODULE,
+    .open = bp_file_open,
+    .read = bp_file_read,
+    .write = bp_file_write
+};
+
+
 static int __init racefinder_module_init(void)
 {
     int ret = 0;
@@ -933,6 +1038,7 @@ static int __init racefinder_module_init(void)
     bp_timer.expires = 0; /* to be set by mod_timer() later */
     
     INIT_LIST_HEAD(&sw_breakpoints);
+    INIT_LIST_HEAD(&funcs_with_offsets);
     
     /* ----------------------- */
     /* AN UGLY HACK. DO NOT DO THIS UNLESS THERE IS NO OTHER CHOICE. */
@@ -975,6 +1081,14 @@ static int __init racefinder_module_init(void)
         pr_err("failed to create a directory in debugfs\n");
         ret = -EINVAL;
         goto out;
+    }
+
+    bp_file = debugfs_create_file("breakpoints", S_IRUGO, debugfs_dir_dentry,
+                                  NULL, &bp_file_ops);
+    if (bp_file == NULL)
+    {
+        pr_err("Failed to create breakpoint control file in debugfs.");
+        goto out_rmdir;
     }
     
     race_counter_file = debugfs_create_file("race_count", S_IRUGO,
@@ -1023,6 +1137,7 @@ static void __exit racefinder_module_exit(void)
     kedr_cleanup_function_subsystem();
     kedr_cleanup_section_subsystem();
     debugfs_remove(race_counter_file);
+    debugfs_remove(bp_file);
     debugfs_remove(debugfs_dir_dentry);
     
     /* Just in case */
