@@ -948,18 +948,14 @@ struct file_operations race_counter_file_ops = {
 
 static int bp_file_open(struct inode *inode, struct file *filp)
 {
-    if (filp->f_mode & FMODE_READ) {
-        char* str = NULL;
-        
-        filp->private_data = str;
-    }
     return nonseekable_open(inode, filp);
 }
 
 static ssize_t bp_file_read(struct file *filp, char __user *buf,
     size_t count, loff_t *f_pos)
 {
-    return count;
+    return -EINVAL;
+//    return count;
 }
 
 static ssize_t bp_file_write(struct file *filp, const char __user *buf,
