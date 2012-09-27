@@ -14,7 +14,6 @@
 
 #include <kedr/asm/insn.h>
 
-//<>
 #include <linux/smp.h>
 #include <linux/sched.h>
 #include <linux/kdebug.h>
@@ -22,7 +21,6 @@
 #include <asm/debugreg.h>
 #include <linux/timer.h>
 #include <linux/kallsyms.h>
-//<>
 
 #include "sections.h"
 #include "functions.h"
@@ -426,14 +424,6 @@ long get_reg_val_by_code(int code, struct pt_regs *regs)
 
 long long get_value_with_size(void *addr, int size)
 {
-    /*int db_regs[5];
-        asm volatile ("mov %%dr0, %0" : "=r"(db_regs[0])); 
-        asm volatile ("mov %%dr1, %0" : "=r"(db_regs[1])); 
-        asm volatile ("mov %%dr2, %0" : "=r"(db_regs[2])); 
-        asm volatile ("mov %%dr3, %0" : "=r"(db_regs[3])); 
-        asm volatile ("mov %%dr7, %0" : "=r"(db_regs[4])); 
-        printk("inside get_value_with_size dr0: %x dr1: %x dr2: %x dr3: %x dr7: %x\n", db_regs[0], db_regs[1], db_regs[2], db_regs[3], db_regs[4]);*/
-
     if (size == 1)
     {
         return *( (uint8_t*) addr );
@@ -444,12 +434,10 @@ long long get_value_with_size(void *addr, int size)
     }
     if (size == 4)
     {
-        //pr_info("[Got ya 4!]\n");
         return *( (uint32_t*) addr );
     }
     if (size == 8)
     {
-    //pr_info("[Got ya 8!]\n");
     return *( (uint64_t*) addr );
     }
     if (size == 16)
@@ -464,20 +452,14 @@ long decode_and_get_addr(void *insn_addr, struct pt_regs *regs)
     unsigned long ea = 0; // *
     long displacement, immediate;
     long long val, newval;
-//  volatile long counter;
     struct insn insn;
     int mod, reg, rm, ss, index, base, rex_r, rex_x, rex_b, size;
-    /*int db_regs[5];*/
 
-//    printk("decode_and_get_mem_addr\n");
     kernel_insn_init(&insn, insn_addr);
     insn_get_length(&insn);
     
-//    printk("insn %x %d\n", (unsigned int) insn.kaddr, (unsigned int) insn.length); // *
-        
     if ((insn_is_mem_read(&insn) || insn_is_mem_write(&insn)) && is_tracked_memory_op(&insn))
     {
-//        printk("insn_is_mem_read / insn_is_mem_write\n");
         insn_get_length(&insn);  // 64bit?
         
         base = X86_SIB_BASE(insn.sib.value);
@@ -495,12 +477,10 @@ long decode_and_get_addr(void *insn_addr, struct pt_regs *regs)
         
         if (immediate != 0)
         {
-//            printk("immediate\n");
             ea = immediate;
         }
         else if (rm == 4)
         {
-//            printk("sib\n");
             reg = reg | (rex_r<<4);
             rm = rm | (rex_b<<4);
             ea = get_reg_val_by_code(base, regs)
@@ -509,17 +489,13 @@ long decode_and_get_addr(void *insn_addr, struct pt_regs *regs)
         }
         else
         {
-//            printk("no sib\n");
             reg = reg | (rex_r<<4);
             base = base | (rex_b<<4);
             index = index | (rex_x<<4);
             ea = get_reg_val_by_code(rm, regs) + displacement;
         }
-//        printk("ea: %lu\n", ea);
         size = get_operand_size_from_insn_attr(&insn, insn.attr.opnd_type1);
-//        printk("size: %d\n", size);
         val = 1 /*get_value_with_size(ea, size)*/;
-//        printk("*ea: %lld \n", val);
         
         racefinder_changed = 0;
         
@@ -529,9 +505,7 @@ long decode_and_get_addr(void *insn_addr, struct pt_regs *regs)
         
         racefinder_unset_hwbp();
 
-        //printk("a1\n");
         newval = 1 /*get_value_with_size(ea, size)*/ ;
-        //printk("a2\n");
         if (racefinder_changed || (val != newval) )
         {
             printk(KERN_INFO 
@@ -570,7 +544,6 @@ int kedr_for_each_insn(unsigned long start_addr, unsigned long end_addr,
 {
     struct insn insn;
     int ret;
-//    struct func_with_offsets *func = (struct func_with_offsets *) data;
     
     while (start_addr < end_addr) {
         kernel_insn_init(&insn, (void *)start_addr);
@@ -605,13 +578,11 @@ int process_insn(struct insn* insn, void* params)
 
     if (nulls != 1)
     {
-//        printk("insn %x %d\n", (unsigned int) insn->kaddr, (unsigned int) insn->length); // *
         
         if ( (insn_is_mem_read(insn) || insn_is_mem_write(insn)) 
           && is_tracked_memory_op(insn) 
           && !insn_has_fs_gs_prefixes(insn))
         {
-//            printk("insn_is_mem_read / insn_is_mem_write\n");
             if (func->offsets_len < CHUNK_SIZE)
             {
                 func->offsets[func->offsets_len] = (unsigned long) insn->kaddr - (unsigned long) func->addr;
@@ -637,7 +608,6 @@ racefinder_unset_breakpoint(void)
     mutex_lock(ptext_mutex);
     if (bp_addr != NULL && bp_set) {
         do_text_poke(bp_addr, &bp_orig_byte, 1);
-        //*bp_addr = bp_orig_byte;
         bp_set = 0;
     }
     mutex_unlock(ptext_mutex);
@@ -652,7 +622,6 @@ work_fn_set_soft_bp(struct work_struct *work)
     if ((bp->addr != NULL) && !bp->set) {
         bp->orig_byte = *(bp->addr);
         do_text_poke(bp->addr, &soft_bp, 1);
-        //*bp_addr = 0xcc;
         bp->set = 1;
     }
     mutex_unlock(ptext_mutex);
@@ -1173,8 +1142,6 @@ static void __exit racefinder_module_exit(void)
     del_timer_sync(&bp_timer);
     
     racefinder_unset_breakpoint();
-    
-    //racefinder_unregister_breakpoint();
     
     //<>
     unregister_die_notifier(&die_nb);
