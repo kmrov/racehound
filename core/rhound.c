@@ -135,34 +135,53 @@ void racehound_add_breakpoint(u8 *addr);
 int racehound_add_breakpoint_fn(char *func_name, unsigned int offset)
 {
     struct func_with_offsets *pos;
+    struct sw_breakpoint *swbp = kzalloc(sizeof(struct sw_breakpoint), GFP_KERNEL);
     int found = 0;
     list_for_each_entry(pos, &funcs_with_offsets, lst) 
     {
         if ( (strcmp(pos->func_name, func_name) == 0) )
         {
-            racehound_add_breakpoint((u8 *)pos->addr + offset);
+            swbp->addr = (u8 *)pos->addr + offset;
+            swbp->reset_allowed = 1;
+            swbp->func_name = kzalloc(strlen(func_name)+1, GFP_KERNEL);
+            strcpy(swbp->func_name, func_name);
+            swbp->offset = offset;
+            swbp->set = 0;
+            INIT_LIST_HEAD(&swbp->lst);
+            mutex_lock(ptext_mutex);
+            list_add_tail(&swbp->lst, &sw_breakpoints);
+            mutex_unlock(ptext_mutex);
             found = 1;
+            return 0;
         }
+    }
+    if (!found) 
+    {
+        kfree(swbp);
     }
     return !found;
 }
 
-void racehound_add_breakpoint(u8 *addr)
+void racehound_remove_breakpoint(char *func_name, unsigned int offset)
 {
-    // TODO: check result, check if already exists
-    struct sw_breakpoint *swbp = kzalloc(sizeof(struct sw_breakpoint), GFP_KERNEL);
-    swbp->addr = addr;
-    swbp->reset_allowed = 1;
-    swbp->set = 0;
-    INIT_LIST_HEAD(&swbp->lst);
-    mutex_lock(ptext_mutex);
-    list_add_tail(&swbp->lst, &sw_breakpoints);
-    mutex_unlock(ptext_mutex);
-}
-
-void racehound_remove_breakpoint(unsigned int offset)
-{
-    // TODO: racefinder_unset_breakpoint   
+    struct sw_breakpoint *pos = NULL;
+    list_for_each_entry(pos, &sw_breakpoints, lst) 
+    {
+        if ( (strcmp(pos->func_name, func_name) == 0) && (pos->offset == offset) )
+        {
+            mutex_lock(ptext_mutex);
+            if (pos->addr != NULL && pos->set) 
+            {
+                do_text_poke(pos->addr, &(pos->orig_byte), 1);
+                pos->set = 0;
+            }
+            list_del(&pos->lst);
+            kfree(pos->func_name);
+            kfree(pos);
+            mutex_unlock(ptext_mutex);
+            break;
+        }
+    }
 }
 
 
@@ -474,25 +493,6 @@ long decode_and_get_addr(void *insn_addr, struct pt_regs *regs)
         rex_x = X86_REX_X(insn.rex_prefix.value);
         rex_b = X86_REX_B(insn.rex_prefix.value);
         
-/*        printk("rex_r: %d rex_x: %d rex_b: %d\n", X86_REX_R(insn.rex_prefix.value),
-                                                  X86_REX_X(insn.rex_prefix.value),
-                                                  X86_REX_B(insn.rex_prefix.value));
-*/        
-/*        printk("base: %d index: %d scale: %d "
-               "mod: %d reg: %d rm: %d " 
-               "displacement: %x ebp: %lu eax: %lu "
-               "immediate: %x \n", 
-               X86_SIB_BASE(insn.sib.value),
-               X86_SIB_INDEX(insn.sib.value),
-               X86_SIB_SCALE(insn.sib.value),
-               X86_MODRM_MOD(insn.modrm.value),
-               X86_MODRM_REG(insn.modrm.value),
-               X86_MODRM_RM(insn.modrm.value),
-               insn.displacement.value,
-               regs->bp,
-               regs->ax,
-               insn.immediate.value);
-*/        
         if (immediate != 0)
         {
 //            printk("immediate\n");
@@ -659,13 +659,6 @@ work_fn_set_soft_bp(struct work_struct *work)
     kfree(swbp_wrk);
 }
 
-/*static void 
-work_fn_clear_soft_bp(struct work_struct *work)
-{
-    racefinder_unset_breakpoint();
-    kfree(work);
-}*/
-
 static void 
 bp_timer_fn(unsigned long arg)
 {
@@ -729,10 +722,6 @@ static int rfinder_detector_notifier_call(struct notifier_block *nb,
                 }
                                 
                 list_for_each_entry(pos, &tmod_funcs, list) {
-                    /*printk("function %s: addr: %lu end: %lu size: %lu ================== \n", 
-                           pos->name, (unsigned long) pos->addr, 
-                           (unsigned long) pos->addr + (unsigned long) pos->text_size,
-                           (unsigned long) pos->text_size);*/
                            
                     func = kzalloc(sizeof(*func), GFP_KERNEL);
                     
@@ -746,32 +735,7 @@ static int rfinder_detector_notifier_call(struct notifier_block *nb,
                                        (unsigned long) pos->addr + (unsigned long) pos->text_size, 
                                        &process_insn, func);
                     list_add_tail(&func->lst, &funcs_with_offsets);
-                    /*
-                    printk("strcmp = %d\n", strcmp(pos->name, "hello_device_write"));
-                    if (strcmp(pos->name, "hello_device_write") == 0)
-                    {
-                        racefinder_set_breakpoint("hello_device_write", 0x4c);
-                    }
-                    */
-                    //printk("strcmp = %d\n", strcmp(pos->name, "hello_plus"));
-//                    if ( (strcmp(pos->name, "hello_plus") == 0) )
-//                    {
-//                        mutex_lock(ptext_mutex);
-//                        racehound_add_breakpoint((u8 *)func->addr + 0x11);
-//                        mutex_unlock(ptext_mutex);
-                        //racefinder_set_breakpoint("hello_plus", 0x8);
-//                    }
-                    
-                    
                 }
-                /*list_for_each_entry(func, &funcs_with_offsets, lst)
-                {
-                    printk("func->name: %s func->offsets_len: %d\n", func->func_name, func->offsets_len);
-                    for (i = 0; i < func->offsets_len; i++)
-                    {
-                        //printk("func->offset[%d]: %d\n", i, func->offsets[i]);
-                    }
-                }*/
                 
                 smp_wmb();
                 bp_timer_fn(0); 
@@ -948,21 +912,74 @@ struct file_operations race_counter_file_ops = {
 
 static int bp_file_open(struct inode *inode, struct file *filp)
 {
-    return nonseekable_open(inode, filp);
+    struct sw_breakpoint *bp;
+    char *bp_list = NULL, *list_tmp = NULL;
+    int list_len = 0, entry_len = 0;
+    list_for_each_entry(bp, &sw_breakpoints, lst) 
+    {
+        if (bp->set)
+        {
+            list_len += snprintf(NULL, 0, "%s+0x%x\n", bp->func_name,
+                                                       bp->offset);
+        }
+    }
+    bp_list = kmalloc(list_len+1, GFP_KERNEL);
+    if (bp_list == NULL)
+    {
+        return -ENOMEM;
+    }
+    list_tmp = bp_list;
+    list_for_each_entry(bp, &sw_breakpoints, lst)
+    {
+        if (bp->set)
+        {
+            entry_len = snprintf(NULL, 0, "%s+0x%x\n", bp->func_name,
+                                                       bp->offset);
+
+            snprintf(list_tmp, entry_len + 1, "%s+0x%x\n", bp->func_name,
+                                                           bp->offset);
+            list_tmp += entry_len;
+        }
+    }
+    bp_list[list_len] = '\0';
+    filp->private_data = bp_list;
+    return 0;
 }
 
 static ssize_t bp_file_read(struct file *filp, char __user *buf,
     size_t count, loff_t *f_pos)
 {
-    return -EINVAL;
-//    return count;
+    int res = 0, len = 0;
+
+    char *bp_list = filp->private_data;
+    
+    if (bp_list == NULL)
+    {
+        return -EINVAL;
+    }
+
+    len = strlen(bp_list);
+    
+    if (count + *f_pos > len)
+    {
+        count = len - *f_pos;
+    }
+
+    res = copy_to_user(buf, bp_list + *f_pos, count);
+    if (res != 0)
+    {
+        return -EINVAL;
+    }
+    (*f_pos) += count;
+    return count;
+
 }
 
 static ssize_t bp_file_write(struct file *filp, const char __user *buf,
     size_t count, loff_t *f_pos)
 {
-    char *str = NULL, *p = NULL, *func_name = NULL, *offset = NULL;
-    unsigned int offset_val = 0, found = 0;
+    char *str = NULL, *orig_str = NULL, *p = NULL, *func_name = NULL, *offset = NULL;
+    unsigned int offset_val = 0, found = 0, remove = 0;
     if(count == 0)
     {
         return -EINVAL;
@@ -983,10 +1000,17 @@ static ssize_t bp_file_write(struct file *filp, const char __user *buf,
         kfree(str);
         return -EFAULT;
     }
+    orig_str = str;
 
     str[count] = '\0';
     if(str[count - 1] == '\n') str[count - 1] = '\0';
-
+    
+    if(str[0] == '-')
+    {
+        remove = 1;
+        str++;
+    }
+    
     for (p = str; *p; p++)
     {
         if (*p == '+')
@@ -996,9 +1020,16 @@ static ssize_t bp_file_write(struct file *filp, const char __user *buf,
             *p = '\0';
             sscanf(offset, "%x", &offset_val);
             printk("func_name: %s offset_val: %x\n", func_name, offset_val);
-            if (racehound_add_breakpoint_fn(func_name, offset_val))
+            if (remove)
             {
-                printk("function %s not found.\n", func_name);
+                racehound_remove_breakpoint(func_name, offset_val);
+            }
+            else
+            {
+                if (racehound_add_breakpoint_fn(func_name, offset_val))
+                {
+                    printk("function %s not found.\n", func_name);
+                }
             }
             found = 1;
         }
@@ -1006,11 +1037,11 @@ static ssize_t bp_file_write(struct file *filp, const char __user *buf,
     
     if (!found) 
     {
-        kfree(str);
+        kfree(orig_str);
         return -EINVAL;
     }
     
-    kfree(str);
+    kfree(orig_str);
     return count;
 }
 
