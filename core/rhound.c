@@ -2,6 +2,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
+#include <linux/random.h>
 #include <linux/err.h>
 #include <linux/mutex.h>
 #include <linux/debugfs.h>
@@ -22,6 +23,7 @@
 #include <linux/timer.h>
 #include <linux/kallsyms.h>
 
+#include "decoder.h"
 #include "sections.h"
 #include "functions.h"
 #include "bp.h"
@@ -72,6 +74,23 @@ struct swbp_work
     struct sw_breakpoint *bp;
 };
 
+struct sw_breakpoint_range 
+{
+    char *func_name;
+    unsigned int offset;
+    
+    struct list_head lst;
+};
+
+struct sw_breakpoint_available
+{
+    char *func_name;
+    unsigned int offset;
+    short chosen;
+    
+    struct list_head lst;
+};
+
 struct sw_breakpoint 
 {
     u8 *addr;
@@ -84,7 +103,19 @@ struct sw_breakpoint
     struct list_head lst;
 };
 
-struct list_head sw_breakpoints;
+struct list_head sw_breakpoints_ranges; // sw_breakpoint_range
+struct list_head sw_breakpoints_pool;   // sw_breakpoint_available
+struct list_head sw_breakpoints_active; // sw_breakpoint
+
+static struct mutex pool_mutex;
+
+/* ====================================================================== */
+
+#define ADDR_TIMER_INTERVAL (HZ * 1) /* randomize breakpoints every 5 sec */
+static struct timer_list addr_timer;
+
+static int random_breakpoints_count = 5;
+module_param(random_breakpoints_count, int, S_IRUGO);
 
 /* ====================================================================== */
 
@@ -99,8 +130,6 @@ module_param(bp_offset, int, S_IRUGO);
 static int bp_reset_allowed = 0;
 
 #define BP_TIMER_INTERVAL (HZ / 2) /* 0.5 sec expressed in jiffies */
-
-#define ADDR_CHANGE_TIMER_INTERVAL (HZ * 10) /* change address every 10 sec */
 
 /* Fires each BP_TIMER_INTERVAL jiffies (or more), resets the sw bp if 
  * needed. */
@@ -127,10 +156,200 @@ static void * (*do_text_poke)(void *addr, const void *opcode, size_t len) =
     NULL;
 /* ====================================================================== */
 
+int racehound_add_breakpoint(char *func_name, unsigned int offset);
+void racehound_sync_ranges_with_pool(void);
 
-void racehound_add_breakpoint(u8 *addr);
+static void
+addr_work_fn(struct work_struct *work)
+{
+    struct sw_breakpoint_available *bpavail = NULL;
+    struct sw_breakpoint *bpactive = NULL, *n = NULL;
+    int pool_length = 0, count = random_breakpoints_count, i=0, j=0, gen = 1;
+    unsigned int random_bp_number;
+    
+    printk("addr_work\n");
 
-int racehound_add_breakpoint_fn(char *func_name, unsigned int offset)
+    mutex_lock(&pool_mutex);
+    mutex_lock(ptext_mutex);
+    
+    printk("mutex\n");
+
+    list_for_each_entry_safe(bpactive, n, &sw_breakpoints_active, lst) 
+    {
+        if (bpactive->addr != NULL && bpactive->set) 
+        {
+            do_text_poke(bpactive->addr, &(bpactive->orig_byte), 1);
+            bpactive->set = 0;
+        }
+        
+        list_del(&bpactive->lst);
+        kfree(bpactive->func_name);
+        kfree(bpactive);
+    }
+    
+    printk("cleared\n");
+
+    list_for_each_entry(bpavail, &sw_breakpoints_pool, lst) 
+    {
+        bpavail->chosen = 0;
+        pool_length++;
+    }
+    
+    printk("count\n");
+
+    if (count > pool_length)
+    {
+        count = pool_length;
+    }
+    
+    for (i = 0; i < count; i++)
+    {
+        gen = 1;
+        while (gen)
+        {
+            get_random_bytes(&random_bp_number, sizeof(random_bp_number));
+            printk("rnd_bytes = %d\n", random_bp_number);
+            random_bp_number = (random_bp_number / INT_MAX) * count;
+            printk("rnd = %d\n", random_bp_number);
+            j = 0;
+            list_for_each_entry(bpavail, &sw_breakpoints_pool, lst) 
+            {
+                if (j == random_bp_number)
+                {
+                    if (!bpavail->chosen)
+                    {
+                        gen = 0;
+                        racehound_add_breakpoint(bpavail->func_name,
+                                                 bpavail->offset);
+                    }
+                }
+                j++;
+            }
+            
+        }
+    }
+
+    printk("gen\n");
+
+    mutex_unlock(ptext_mutex);
+    mutex_unlock(&pool_mutex);
+    kfree(work);
+}
+
+static void 
+addr_timer_fn(unsigned long arg)
+{
+    struct work_struct *work;
+    printk("addr_timer\n");
+
+    work = kzalloc(sizeof(*work), GFP_ATOMIC);
+    if (work != NULL) {
+        INIT_WORK(work, addr_work_fn);
+        queue_work(wq, work);
+    }
+    else {
+        pr_info("addr_timer_fn(): out of memory");
+    }
+
+    mod_timer(&addr_timer, jiffies + ADDR_TIMER_INTERVAL);
+}
+
+void racehound_add_breakpoint_range(char *func_name, unsigned int offset)
+{
+    struct sw_breakpoint_range *range = kzalloc(sizeof(struct sw_breakpoint_range), GFP_KERNEL);
+    range->offset = offset;
+    range->func_name = kzalloc(strlen(func_name)+1, GFP_KERNEL);
+    strcpy(range->func_name, func_name);
+    INIT_LIST_HEAD(&range->lst);
+    list_add_tail(&range->lst, &sw_breakpoints_ranges);
+    racehound_sync_ranges_with_pool();
+}
+
+void racehound_remove_breakpoint_range(char *func_name, unsigned int offset)
+{
+    struct sw_breakpoint_range *pos = NULL, *n = NULL;
+    list_for_each_entry_safe(pos, n, &sw_breakpoints_ranges, lst) 
+    {
+        if ( (strcmp(pos->func_name, func_name) == 0) && (pos->offset == offset) )
+        {
+            list_del(&pos->lst);
+            kfree(pos->func_name);
+            kfree(pos);
+        }
+    }
+    racehound_sync_ranges_with_pool();
+}
+
+void racehound_sync_ranges_with_pool(void)
+{
+    struct sw_breakpoint_range *bprange = NULL;
+    struct sw_breakpoint_available *bpavail = NULL, *n = NULL;
+    struct func_with_offsets *func = NULL, *found_func = NULL;
+    int i = 0;
+    
+    mutex_lock(&pool_mutex);
+    list_for_each_entry_safe(bpavail, n, &sw_breakpoints_pool, lst)
+    {
+        list_del(&bpavail->lst);
+        kfree(bpavail);
+    }
+    
+    list_for_each_entry(bprange, &sw_breakpoints_ranges, lst)
+    {
+        if (bprange->func_name)
+        {
+            list_for_each_entry(func, &funcs_with_offsets, lst) 
+            {
+                if ( (strcmp(func->func_name, bprange->func_name) == 0) )
+                {
+                    found_func = func;
+                    break;
+                }
+            }
+            if (bprange->offset)
+            {
+                bpavail = kzalloc(sizeof(*bpavail), GFP_KERNEL);
+                bpavail->offset = bprange->offset;
+                bpavail->func_name = kzalloc(strlen(bprange->func_name)+1, GFP_KERNEL);
+                strcpy(bpavail->func_name, bprange->func_name);
+                INIT_LIST_HEAD(&bpavail->lst);
+                list_add_tail(&bpavail->lst, &sw_breakpoints_pool);
+            }
+            else
+            {
+                for (i = 0; i < found_func->offsets_len; i++)
+                {
+                    bpavail = kzalloc(sizeof(*bpavail), GFP_KERNEL);
+                    bpavail->offset = found_func->offsets[i];
+                    bpavail->func_name = kzalloc(strlen(bprange->func_name)+1, GFP_KERNEL);
+                    strcpy(bpavail->func_name, bprange->func_name);
+                    INIT_LIST_HEAD(&bpavail->lst);
+                    list_add_tail(&bpavail->lst, &sw_breakpoints_pool);
+                }
+            }
+        }
+        else
+        {
+            list_for_each_entry(func, &funcs_with_offsets, lst) 
+            {
+                for (i = 0; i < func->offsets_len; i++)
+                {
+                    bpavail = kzalloc(sizeof(*bpavail), GFP_KERNEL);
+                    bpavail->offset = found_func->offsets[i];
+                    bpavail->func_name = kzalloc(strlen(bprange->func_name)+1, GFP_KERNEL);
+                    strcpy(bpavail->func_name, bprange->func_name);
+                    INIT_LIST_HEAD(&bpavail->lst);
+                    list_add_tail(&bpavail->lst, &sw_breakpoints_pool);
+                }
+            }
+        }
+    }
+    
+    mutex_unlock(&pool_mutex);
+}
+
+/* Should be called with text_mutex locked */
+int racehound_add_breakpoint(char *func_name, unsigned int offset)
 {
     struct func_with_offsets *pos;
     struct sw_breakpoint *swbp = kzalloc(sizeof(struct sw_breakpoint), GFP_KERNEL);
@@ -146,9 +365,7 @@ int racehound_add_breakpoint_fn(char *func_name, unsigned int offset)
             swbp->offset = offset;
             swbp->set = 0;
             INIT_LIST_HEAD(&swbp->lst);
-            mutex_lock(ptext_mutex);
-            list_add_tail(&swbp->lst, &sw_breakpoints);
-            mutex_unlock(ptext_mutex);
+            list_add_tail(&swbp->lst, &sw_breakpoints_active);
             found = 1;
             return 0;
         }
@@ -160,14 +377,14 @@ int racehound_add_breakpoint_fn(char *func_name, unsigned int offset)
     return !found;
 }
 
+/* Should be called with text_mutex locked */
 void racehound_remove_breakpoint(char *func_name, unsigned int offset)
 {
     struct sw_breakpoint *pos = NULL;
-    list_for_each_entry(pos, &sw_breakpoints, lst) 
+    list_for_each_entry(pos, &sw_breakpoints_active, lst) 
     {
         if ( (strcmp(pos->func_name, func_name) == 0) && (pos->offset == offset) )
         {
-            mutex_lock(ptext_mutex);
             if (pos->addr != NULL && pos->set) 
             {
                 do_text_poke(pos->addr, &(pos->orig_byte), 1);
@@ -176,275 +393,48 @@ void racehound_remove_breakpoint(char *func_name, unsigned int offset)
             list_del(&pos->lst);
             kfree(pos->func_name);
             kfree(pos);
-            mutex_unlock(ptext_mutex);
             break;
         }
     }
 }
 
 
-
-/* Checks if the instruction has addressing method (type) E and its Mod R/M 
- * expression refers to memory.
- *
- * [NB] CMPXCHG, SETcc, etc. also have type E and will be reported by this 
- * function as such. To distinguish them from other type E instructions, use
- * is_*_cmpxchg() and the like. */
-static int
-is_insn_type_e(struct insn *insn)
+static int process_insn(struct insn* insn, void* params)
 {
-    insn_attr_t *attr = &insn->attr;
-    u8 modrm = insn->modrm.bytes[0];
-    
-    return ((attr->addr_method1 == INAT_AMETHOD_E || 
-        attr->addr_method2 == INAT_AMETHOD_E) &&
-        X86_MODRM_MOD(modrm) != 3);
-}
+    int i;
+    short nulls = 1;
+    struct func_with_offsets *func = (struct func_with_offsets *) params;
+    for (i = 0; i < insn->length; i++)
+    {
+        if (*(i + (unsigned char *) insn->kaddr) != 0)
+        {
+            nulls = 0;
+        }
+    }
 
-static int
-is_insn_xlat(struct insn *insn)
-{
-    u8 *opcode = insn->opcode.bytes;
-    
-    /* XLAT: D7 */
-    return (opcode[0] == 0xd7);
-}
-
-static int
-is_insn_direct_offset_mov(struct insn *insn)
-{
-    u8 *opcode = insn->opcode.bytes;
-    
-    /* Direct memory offset MOVs: A0-A3 */
-    return (opcode[0] >= 0xa0 && opcode[0] <= 0xa3);
-}
-
-/* Opcode: FF/2 */
-static int
-is_insn_call_near_indirect(struct insn *insn)
-{
-    return (insn->opcode.bytes[0] == 0xff && 
-        X86_MODRM_REG(insn->modrm.bytes[0]) == 2);
-}
-
-/* Opcode: FF/4 */
-static int
-is_insn_jump_near_indirect(struct insn *insn)
-{
-    return (insn->opcode.bytes[0] == 0xff && 
-        X86_MODRM_REG(insn->modrm.bytes[0]) == 4);
-}
-
-/* Opcodes: FF/3 or 9A */
-static int
-is_insn_call_far(struct insn *insn)
-{
-    u8 opcode = insn->opcode.bytes[0];
-    u8 modrm = insn->modrm.bytes[0];
-    
-    return (opcode == 0x9a || 
-        (opcode == 0xff && X86_MODRM_REG(modrm) == 3));
-}
-
-/* Opcodes: FF/5 or EA */
-static int
-is_insn_jump_far(struct insn *insn)
-{
-    u8 opcode = insn->opcode.bytes[0];
-    u8 modrm = insn->modrm.bytes[0];
-    
-    return (opcode == 0xea || 
-        (opcode == 0xff && X86_MODRM_REG(modrm) == 5));
-}
-
-static int
-is_insn_cmpxchg8b_16b(struct insn *insn)
-{
-    u8 *opcode = insn->opcode.bytes;
-    u8 modrm = insn->modrm.bytes[0];
-    
-    /* CMPXCHG8B/CMPXCHG16B: 0F C7 /1 */
-    return (opcode[0] == 0x0f && opcode[1] == 0xc7 &&
-        X86_MODRM_REG(modrm) == 1);
-}
-
-static int
-is_insn_type_x(struct insn *insn)
-{
-    insn_attr_t *attr = &insn->attr;
-    return (attr->addr_method1 == INAT_AMETHOD_X ||
-        attr->addr_method2 == INAT_AMETHOD_X);
-}
-
-static int
-is_insn_type_y(struct insn *insn)
-{
-    insn_attr_t *attr = &insn->attr;
-    return (attr->addr_method1 == INAT_AMETHOD_Y || 
-        attr->addr_method2 == INAT_AMETHOD_Y);
-}
-
-static int
-is_insn_movbe(struct insn *insn)
-{
-    u8 *opcode = insn->opcode.bytes;
-    
-    /* We need to check the prefix to distinguish MOVBE from CRC32 insn,
-     * they have the same opcode. */
-    if (insn_has_prefix(insn, 0xf2))
+    if (nulls != 1)
+    {
+        
+        if ( (insn_is_mem_read(insn) || insn_is_mem_write(insn)) 
+          && is_tracked_memory_op(insn) 
+          && !insn_has_fs_gs_prefixes(insn))
+        {
+            if (func->offsets_len < CHUNK_SIZE)
+            {
+                func->offsets[func->offsets_len] = (unsigned long) insn->kaddr - (unsigned long) func->addr;
+                func->offsets_len++;
+            }
+            else
+            {
+                return 1;
+            }
+        }
         return 0;
-    
-    /* MOVBE: 0F 38 F0 and 0F 38 F1 */
-    return (opcode[0] == 0x0f && opcode[1] == 0x38 &&
-        (opcode[2] == 0xf0 || opcode[2] == 0xf1));
-}
-
-/* Check if the memory addressing expression uses %rsp/%esp. */
-static int
-expr_uses_sp(struct insn *insn)
-{
-    unsigned int expr_reg_mask = insn_reg_mask_for_expr(insn);
-    return (expr_reg_mask & X86_REG_MASK(INAT_REG_CODE_SP));
-} 
-
-static int 
-is_tracked_memory_op(struct insn *insn)
-{
-    /* Filter out indirect jumps and calls first, we do not track these
-     * memory accesses. */
-    if (is_insn_call_near_indirect(insn) || 
-        is_insn_jump_near_indirect(insn) ||
-        is_insn_call_far(insn) || is_insn_jump_far(insn))
-        return 0;
-    
-    if (insn_is_noop(insn))
-        return 0;
-    
-    /* Locked updates should always be tracked, because they are 
-     * memory barriers among other things.
-     * "lock add $0, (%esp)" is used, for example, when "mfence" is not
-     * available. Note that this locked instruction addresses the stack
-     * so we must not filter out locked updates even if they refer to
-     * the stack. 
-     * 
-     * [NB] I/O instructions accessing memory should always be tracked 
-     * too but this is fulfilled automatically because these are string 
-     * operations. */
-    if (insn_is_locked_op(insn))
-        return 1;
-    
-    if (is_insn_type_e(insn) || is_insn_movbe(insn) || 
-        is_insn_cmpxchg8b_16b(insn)) {
-            return (/* process_stack_accesses || */ !expr_uses_sp(insn));
     }
-    
-    if (is_insn_type_x(insn) || is_insn_type_y(insn))
-        return 1;
-    
-    if (is_insn_direct_offset_mov(insn) || is_insn_xlat(insn))
-        return 1;
-
-    return 0;
-}
-
-static unsigned int
-get_operand_size_from_insn_attr(struct insn *insn, unsigned char opnd_type)
-{
-    BUG_ON(insn->length == 0);
-    BUG_ON(insn->opnd_bytes == 0);
-    
-    switch (opnd_type)
+    else
     {
-    case INAT_OPTYPE_B:
-        /* Byte, regardless of operand-size attribute. */
-        return 1;
-    case INAT_OPTYPE_D:
-        /* Doubleword, regardless of operand-size attribute. */
-        return 4;
-    case INAT_OPTYPE_Q:
-        /* Quadword, regardless of operand-size attribute. */
-        return 8;
-    case INAT_OPTYPE_V:
-        /* Word, doubleword or quadword (in 64-bit mode), depending 
-         * on operand-size attribute. */
-        return insn->opnd_bytes;
-    case INAT_OPTYPE_W:
-        /* Word, regardless of operand-size attribute. */
-        return 2;
-    case INAT_OPTYPE_Z:
-        /* Word for 16-bit operand-size or doubleword for 32 or 
-         * 64-bit operand-size. */
-        return (insn->opnd_bytes == 2 ? 2 : 4);
-    default: break;
+        return -1;
     }
-    return insn->opnd_bytes; /* just in case */
-}
-
-long get_reg_val_by_code(int code, struct pt_regs *regs)
-{
-    switch (code)
-    {
-        case (INAT_REG_CODE_AX):
-            return regs->ax;
-        case (INAT_REG_CODE_CX):
-            return regs->cx;
-        case (INAT_REG_CODE_DX):
-            return regs->dx;
-        case (INAT_REG_CODE_BX):
-            return regs->bx;
-        case (INAT_REG_CODE_SP):
-            return regs->sp;
-        case (INAT_REG_CODE_BP):
-            return regs->bp;
-        case (INAT_REG_CODE_SI):
-            return regs->si;
-        case (INAT_REG_CODE_DI):
-            return regs->di;
-#ifndef __i386__
-        case (INAT_REG_CODE_8):
-            return regs->r8;
-        case (INAT_REG_CODE_9):
-            return regs->r9;
-        case (INAT_REG_CODE_10):
-            return regs->r10;
-        case (INAT_REG_CODE_11):
-            return regs->r11;
-        case (INAT_REG_CODE_12):
-            return regs->r12;
-        case (INAT_REG_CODE_13):
-            return regs->r13;
-        case (INAT_REG_CODE_14):
-            return regs->r14;
-        case (INAT_REG_CODE_15):
-            return regs->r15;
-#endif // __i386__
-    }
-    return 0;
-}
-
-long long get_value_with_size(void *addr, int size)
-{
-    if (size == 1)
-    {
-        return *( (uint8_t*) addr );
-    }
-    if (size == 2)
-    {
-        return *( (uint16_t*) addr );
-    }
-    if (size == 4)
-    {
-        return *( (uint32_t*) addr );
-    }
-    if (size == 8)
-    {
-    return *( (uint64_t*) addr );
-    }
-    if (size == 16)
-    {
-        return *( (uint64_t*) addr );
-    }
-    return *( (int*) addr );
 }
 
 long decode_and_get_addr(void *insn_addr, struct pt_regs *regs)
@@ -524,82 +514,6 @@ long decode_and_get_addr(void *insn_addr, struct pt_regs *regs)
     return ea;
 }
 
-int insn_has_fs_gs_prefixes(struct insn *insn)
-{
-    int i;
-    insn_byte_t *prefixes = insn->prefixes.bytes;
-    insn_get_prefixes(insn);
-    for (i = 0; i < X86_NUM_LEGACY_PREFIXES; i++)
-    {
-        if (prefixes[i] == 0x64 || prefixes[i] == 0x65)
-        {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-int kedr_for_each_insn(unsigned long start_addr, unsigned long end_addr,
-    int (*proc)(struct insn *, void *), void *data) 
-{
-    struct insn insn;
-    int ret;
-    
-    while (start_addr < end_addr) {
-        kernel_insn_init(&insn, (void *)start_addr);
-        insn_get_length(&insn);  /* Decode the instruction */
-        if (insn.length == 0) {
-            pr_err("Failed to decode instruction at %p\n",
-                (const void *)start_addr);
-            return -EILSEQ;
-        }
-        
-        ret = proc(&insn, data); /* Process the instruction */
-        if (ret != 0)
-            return ret;
-        
-        start_addr += insn.length;
-    }
-    return 0;
-}
-
-int process_insn(struct insn* insn, void* params)
-{
-    int i;
-    short nulls = 1;
-    struct func_with_offsets *func = (struct func_with_offsets *) params;
-    for (i = 0; i < insn->length; i++)
-    {
-        if (*(i + (unsigned char *) insn->kaddr) != 0)
-        {
-            nulls = 0;
-        }
-    }
-
-    if (nulls != 1)
-    {
-        
-        if ( (insn_is_mem_read(insn) || insn_is_mem_write(insn)) 
-          && is_tracked_memory_op(insn) 
-          && !insn_has_fs_gs_prefixes(insn))
-        {
-            if (func->offsets_len < CHUNK_SIZE)
-            {
-                func->offsets[func->offsets_len] = (unsigned long) insn->kaddr - (unsigned long) func->addr;
-                func->offsets_len++;
-            }
-            else
-            {
-                return 1;
-            }
-        }
-        return 0;
-    }
-    else
-    {
-        return -1;
-    }
-}
 
 /* [NB] Cannot be called from atomic context */
 void
@@ -637,7 +551,7 @@ bp_timer_fn(unsigned long arg)
     
     smp_rmb();
     
-    list_for_each_entry(bp, &sw_breakpoints, lst) 
+    list_for_each_entry(bp, &sw_breakpoints_active, lst) 
     {
         to_reset = bp->reset_allowed;
         if (to_reset)
@@ -658,7 +572,7 @@ bp_timer_fn(unsigned long arg)
                 pr_info("bp_timer_fn(): out of memory");
             }
         }
-    }    
+    }
     
     mod_timer(&bp_timer, jiffies + BP_TIMER_INTERVAL);
 }
@@ -705,21 +619,24 @@ static int rfinder_detector_notifier_call(struct notifier_block *nb,
                                        &process_insn, func);
                     list_add_tail(&func->lst, &funcs_with_offsets);
                 }
-                
+                racehound_sync_ranges_with_pool();
                 smp_wmb();
-                bp_timer_fn(0); 
+                bp_timer_fn(0);
+                addr_timer_fn(0);
             }
         break;
         
         case MODULE_STATE_GOING:
             if(mod == target_module)
             {
+                printk("unload\n");
                 smp_wmb();
-                list_for_each_entry(bp, &sw_breakpoints, lst)
+                list_for_each_entry(bp, &sw_breakpoints_active, lst)
                 {
                     bp->reset_allowed = 0;
                 }
                 del_timer_sync(&bp_timer);
+                del_timer_sync(&addr_timer);
                 
                 // No need to unset the sw breakpoint, the 
                 // code where it is set will no longer be 
@@ -754,7 +671,7 @@ on_soft_bp_triggered(struct die_args *args)
      * How should we protect the access to 'bp_addr'? A spinlock in 
      * addition to text_mutex? */
     
-    list_for_each_entry(bp, &sw_breakpoints, lst)
+    list_for_each_entry(bp, &sw_breakpoints_active, lst)
     {
         if ((bp->addr + 1) == (u8*) args->regs->ip)
         {
@@ -884,7 +801,7 @@ static int bp_file_open(struct inode *inode, struct file *filp)
     struct sw_breakpoint *bp;
     char *bp_list = NULL, *list_tmp = NULL;
     int list_len = 0, entry_len = 0;
-    list_for_each_entry(bp, &sw_breakpoints, lst) 
+    list_for_each_entry(bp, &sw_breakpoints_active, lst) 
     {
         if (bp->set)
         {
@@ -898,7 +815,7 @@ static int bp_file_open(struct inode *inode, struct file *filp)
         return -ENOMEM;
     }
     list_tmp = bp_list;
-    list_for_each_entry(bp, &sw_breakpoints, lst)
+    list_for_each_entry(bp, &sw_breakpoints_active, lst)
     {
         if (bp->set)
         {
@@ -987,24 +904,28 @@ static ssize_t bp_file_write(struct file *filp, const char __user *buf,
             func_name = str;
             offset = p + 1;
             *p = '\0';
-            sscanf(offset, "%x", &offset_val);
-            printk("func_name: %s offset_val: %x\n", func_name, offset_val);
-            if (remove)
+            if (*offset == '*')
             {
-                racehound_remove_breakpoint(func_name, offset_val);
+                offset_val = 0;
             }
             else
             {
-                if (racehound_add_breakpoint_fn(func_name, offset_val))
-                {
-                    printk("function %s not found.\n", func_name);
-                }
+                sscanf(offset, "%x", &offset_val);
+            }
+            printk("func_name: %s offset_val: %x\n", func_name, offset_val);
+            if (remove)
+            {
+                racehound_remove_breakpoint_range(func_name, offset_val);
+            }
+            else
+            {
+                racehound_add_breakpoint_range(func_name, offset_val);
             }
             found = 1;
         }
     }
     
-    if (!found) 
+    if (!found)
     {
         kfree(orig_str);
         return -EINVAL;
@@ -1032,8 +953,18 @@ static int __init racefinder_module_init(void)
     bp_timer.function = bp_timer_fn;
     bp_timer.data = 0;
     bp_timer.expires = 0; /* to be set by mod_timer() later */
+
+    init_timer(&addr_timer);
+    addr_timer.function = addr_timer_fn;
+    addr_timer.data = 0;
+    addr_timer.expires = 0;
     
-    INIT_LIST_HEAD(&sw_breakpoints);
+    INIT_LIST_HEAD(&sw_breakpoints_active);
+    INIT_LIST_HEAD(&sw_breakpoints_pool);
+    INIT_LIST_HEAD(&sw_breakpoints_ranges);
+
+    mutex_init(&pool_mutex);
+    
     INIT_LIST_HEAD(&funcs_with_offsets);
     
     /* ----------------------- */
@@ -1123,11 +1054,11 @@ out:
 
 static void __exit racefinder_module_exit(void)
 {
+    printk("exit\n");
     flush_workqueue( wq );
 
     destroy_workqueue( wq );
-
-    
+    printk("destroyed workqueue\n");
     unregister_module_notifier(&detector_nb);
 
     kedr_cleanup_function_subsystem();
@@ -1140,8 +1071,10 @@ static void __exit racefinder_module_exit(void)
     smp_wmb();
     bp_reset_allowed = 0;
     del_timer_sync(&bp_timer);
+    del_timer_sync(&addr_timer);
+    printk("deleted timers\n");
     
-    racefinder_unset_breakpoint();
+    // racefinder_unset_breakpoint();
     
     //<>
     unregister_die_notifier(&die_nb);

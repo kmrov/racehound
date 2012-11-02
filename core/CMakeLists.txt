@@ -20,11 +20,13 @@ kbuild_add_module(${kmodule_name}
 	"functions.c"
 	"bp.c"
 	"sections.c"
+	"decoder.c"
 
 # Only for dependencies	
 	"functions.h"
 	"bp.h"
 	"sections.h"
+	"decoder.h"
 # Arch-dependent sources and header
     "${arch_dir}/lib/inat.c"
     "${arch_dir}/lib/insn.c"
