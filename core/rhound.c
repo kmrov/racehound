@@ -158,6 +158,7 @@ static void * (*do_text_poke)(void *addr, const void *opcode, size_t len) =
 
 int racehound_add_breakpoint(char *func_name, unsigned int offset);
 void racehound_sync_ranges_with_pool(void);
+static void bp_timer_fn(unsigned long arg);
 
 static void
 addr_work_fn(struct work_struct *work)
@@ -167,13 +168,9 @@ addr_work_fn(struct work_struct *work)
     int pool_length = 0, count = random_breakpoints_count, i=0, j=0, gen = 1;
     unsigned int random_bp_number;
     
-    printk("addr_work\n");
-
     mutex_lock(&pool_mutex);
     mutex_lock(ptext_mutex);
     
-    printk("mutex\n");
-
     list_for_each_entry_safe(bpactive, n, &sw_breakpoints_active, lst) 
     {
         if (bpactive->addr != NULL && bpactive->set) 
@@ -186,16 +183,12 @@ addr_work_fn(struct work_struct *work)
         kfree(bpactive->func_name);
         kfree(bpactive);
     }
-    
-    printk("cleared\n");
 
     list_for_each_entry(bpavail, &sw_breakpoints_pool, lst) 
     {
         bpavail->chosen = 0;
         pool_length++;
     }
-    
-    printk("count\n");
 
     if (count > pool_length)
     {
@@ -208,9 +201,7 @@ addr_work_fn(struct work_struct *work)
         while (gen)
         {
             get_random_bytes(&random_bp_number, sizeof(random_bp_number));
-            printk("rnd_bytes = %d\n", random_bp_number);
             random_bp_number = (random_bp_number / INT_MAX) * count;
-            printk("rnd = %d\n", random_bp_number);
             j = 0;
             list_for_each_entry(bpavail, &sw_breakpoints_pool, lst) 
             {
@@ -229,10 +220,9 @@ addr_work_fn(struct work_struct *work)
         }
     }
 
-    printk("gen\n");
-
     mutex_unlock(ptext_mutex);
     mutex_unlock(&pool_mutex);
+    bp_timer_fn(0);
     kfree(work);
 }
 
@@ -240,7 +230,6 @@ static void
 addr_timer_fn(unsigned long arg)
 {
     struct work_struct *work;
-    printk("addr_timer\n");
 
     work = kzalloc(sizeof(*work), GFP_ATOMIC);
     if (work != NULL) {
@@ -550,7 +539,6 @@ bp_timer_fn(unsigned long arg)
     struct sw_breakpoint *bp;
     
     smp_rmb();
-    
     list_for_each_entry(bp, &sw_breakpoints_active, lst) 
     {
         to_reset = bp->reset_allowed;
@@ -621,8 +609,8 @@ static int rfinder_detector_notifier_call(struct notifier_block *nb,
                 }
                 racehound_sync_ranges_with_pool();
                 smp_wmb();
-                bp_timer_fn(0);
                 addr_timer_fn(0);
+                bp_timer_fn(0);
             }
         break;
         
