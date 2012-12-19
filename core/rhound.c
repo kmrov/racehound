@@ -111,7 +111,7 @@ static struct mutex pool_mutex;
 
 /* ====================================================================== */
 
-#define ADDR_TIMER_INTERVAL (HZ * 1) /* randomize breakpoints every 5 sec */
+#define ADDR_TIMER_INTERVAL (HZ * 13 / 16) /* randomize breakpoints every 5 sec */
 static struct timer_list addr_timer;
 
 static int random_breakpoints_count = 5;
@@ -129,7 +129,7 @@ module_param(bp_offset, int, S_IRUGO);
  * itself. */
 static int bp_reset_allowed = 0;
 
-#define BP_TIMER_INTERVAL (HZ / 2) /* 0.5 sec expressed in jiffies */
+#define BP_TIMER_INTERVAL (HZ * 2 / 5) /* 0.5 sec expressed in jiffies */
 
 /* Fires each BP_TIMER_INTERVAL jiffies (or more), resets the sw bp if 
  * needed. */
@@ -519,47 +519,35 @@ racefinder_unset_breakpoint(void)
 static void 
 work_fn_set_soft_bp(struct work_struct *work)
 {
-    struct swbp_work *swbp_wrk = (struct swbp_work *) work;
-    struct sw_breakpoint *bp = swbp_wrk->bp;
+    struct sw_breakpoint *bp;
     mutex_lock(ptext_mutex);
-    if ((bp->addr != NULL) && !bp->set) {
-        bp->orig_byte = *(bp->addr);
-        do_text_poke(bp->addr, &soft_bp, 1);
-        bp->set = 1;
+    list_for_each_entry(bp, &sw_breakpoints_active, lst) 
+    {
+        if (bp->reset_allowed)
+        {
+            if ((bp->addr != NULL) && !bp->set) {
+                bp->orig_byte = *(bp->addr);
+                do_text_poke(bp->addr, &soft_bp, 1);
+                bp->set = 1;
+            }
+        }
     }
     mutex_unlock(ptext_mutex);
-    kfree(swbp_wrk);
+    kfree(work);
 }
 
 static void 
 bp_timer_fn(unsigned long arg)
 {
-    int to_reset = 0;
-    struct swbp_work *work = NULL;
-    struct sw_breakpoint *bp;
-    
-    smp_rmb();
-    list_for_each_entry(bp, &sw_breakpoints_active, lst) 
-    {
-        to_reset = bp->reset_allowed;
-        if (to_reset)
-        {
-            /* [NB] If you call text_poke() / do_text_poke() directly and do 
-             * not care about text_mutex, you do not need to use the workqueue
-             * here.
-             * Same if CONFIG_DEBUG_SET_MODULE_RONX=n and you are writing the 
-             * opcodes directly rather than with text_poke. */
-    
-            work = kzalloc(sizeof(*work), GFP_ATOMIC);
-            if (work != NULL) {
-                INIT_WORK(&work->wrk, work_fn_set_soft_bp);
-                work->bp = bp;
-                queue_work(wq, &work->wrk);
-            }
-            else {
-                pr_info("bp_timer_fn(): out of memory");
-            }
-        }
+    struct work_struct *work = NULL;
+
+    work = kzalloc(sizeof(*work), GFP_ATOMIC);
+    if (work != NULL) {
+        INIT_WORK(work, work_fn_set_soft_bp);
+        queue_work(wq, work);
+    }
+    else {
+        pr_info("addr_timer_fn(): out of memory");
     }
     
     mod_timer(&bp_timer, jiffies + BP_TIMER_INTERVAL);
