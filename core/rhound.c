@@ -111,7 +111,7 @@ static struct mutex pool_mutex;
 
 /* ====================================================================== */
 
-#define ADDR_TIMER_INTERVAL (HZ * 13 / 16) /* randomize breakpoints every 5 sec */
+#define ADDR_TIMER_INTERVAL (HZ * 1) /* randomize breakpoints every 5 sec */
 static struct timer_list addr_timer;
 
 static int random_breakpoints_count = 5;
@@ -129,7 +129,7 @@ module_param(bp_offset, int, S_IRUGO);
  * itself. */
 static int bp_reset_allowed = 0;
 
-#define BP_TIMER_INTERVAL (HZ * 2 / 5) /* 0.5 sec expressed in jiffies */
+#define BP_TIMER_INTERVAL (HZ / 2) /* 0.5 sec expressed in jiffies */
 
 /* Fires each BP_TIMER_INTERVAL jiffies (or more), resets the sw bp if 
  * needed. */
