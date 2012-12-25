@@ -111,6 +111,8 @@ static struct mutex pool_mutex;
 
 /* ====================================================================== */
 
+#define DELAY_MSEC 200
+
 #define ADDR_TIMER_INTERVAL (HZ * 1) /* randomize breakpoints every 5 sec */
 static struct timer_list addr_timer;
 
@@ -123,12 +125,6 @@ module_param(random_breakpoints_count, int, S_IRUGO);
 static unsigned int bp_offset = 0x11;
 module_param(bp_offset, int, S_IRUGO);
 
-/* Set it to a non-zero value to allow resetting the timer that will place 
- * the sw bp again.
- * Set it to 0 before deleting the timer to prevent it from resetting 
- * itself. */
-static int bp_reset_allowed = 0;
-
 #define BP_TIMER_INTERVAL (HZ / 2) /* 0.5 sec expressed in jiffies */
 
 /* Fires each BP_TIMER_INTERVAL jiffies (or more), resets the sw bp if 
@@ -138,15 +134,6 @@ static int bp_reset_allowed = 0;
 static struct timer_list bp_timer;
 
 static u8 soft_bp = 0xcc;
-
-static int bp_set = 0; /* non-zero - sw bp is currently set, 0 - not set */
-
-/* Address of the sw breakpoint, NULL if the target is not loaded. */
-static u8 *bp_addr = NULL; 
-
-/* The first byte of the instruction replaced with a breakpoint. Initialized
- * to 0xcc just in case. */
-static u8 bp_orig_byte = 0xcc;
 
 // TODO: get it some other way rather than lookup by name...
 // All this is not needed if CONFIG_DEBUG_SET_MODULE_RONX=n. Otherwise, only
@@ -480,7 +467,7 @@ long decode_and_get_addr(void *insn_addr, struct pt_regs *regs)
         
         racefinder_set_hwbp((void *)ea);
         
-        mdelay(200);
+        mdelay(DELAY_MSEC);
         
         racefinder_unset_hwbp();
 
@@ -607,20 +594,20 @@ static int rfinder_detector_notifier_call(struct notifier_block *nb,
             {
                 printk("unload\n");
                 smp_wmb();
+
+                del_timer_sync(&bp_timer);
+                del_timer_sync(&addr_timer);
+
                 list_for_each_entry(bp, &sw_breakpoints_active, lst)
                 {
                     bp->reset_allowed = 0;
                 }
-                del_timer_sync(&bp_timer);
-                del_timer_sync(&addr_timer);
                 
                 // No need to unset the sw breakpoint, the 
                 // code where it is set will no longer be 
                 // able to execute.
                 //racefinder_unset_breakpoint();
                 
-                bp_addr = NULL;
-                bp_orig_byte = 0xcc;
                 target_module = NULL;
                 printk("hello unload detected\n");
             }
@@ -1045,7 +1032,6 @@ static void __exit racefinder_module_exit(void)
     
     /* Just in case */
     smp_wmb();
-    bp_reset_allowed = 0;
     del_timer_sync(&bp_timer);
     del_timer_sync(&addr_timer);
     printk("deleted timers\n");
