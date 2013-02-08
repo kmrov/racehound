@@ -490,19 +490,6 @@ long decode_and_get_addr(void *insn_addr, struct pt_regs *regs)
     return ea;
 }
 
-
-/* [NB] Cannot be called from atomic context */
-void
-racefinder_unset_breakpoint(void)
-{
-    mutex_lock(ptext_mutex);
-    if (bp_addr != NULL && bp_set) {
-        do_text_poke(bp_addr, &bp_orig_byte, 1);
-        bp_set = 0;
-    }
-    mutex_unlock(ptext_mutex);
-}
-
 static void 
 work_fn_set_soft_bp(struct work_struct *work)
 {
