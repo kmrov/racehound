@@ -3,6 +3,7 @@
 #include <linux/kernel.h>
 #include <asm/errno.h>
 #include <asm/ptrace.h>
+#include <asm/bug.h>
 #include "decoder.h"
 
 
