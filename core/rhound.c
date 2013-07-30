@@ -155,6 +155,8 @@ addr_work_fn(struct work_struct *work)
     int pool_length = 0, count = random_breakpoints_count, i=0, j=0, gen = 1;
     unsigned int random_bp_number;
     
+    printk("addr_work_fn started\n");
+
     mutex_lock(&pool_mutex);
     mutex_lock(ptext_mutex);
     
@@ -211,6 +213,7 @@ addr_work_fn(struct work_struct *work)
     mutex_unlock(&pool_mutex);
     bp_timer_fn(0);
     kfree(work);
+    printk("addr_work_fn finished\n");
 }
 
 static void 
@@ -226,6 +229,8 @@ addr_timer_fn(unsigned long arg)
     else {
         pr_info("addr_timer_fn(): out of memory");
     }
+
+    printk("addr_timer\n");
 
     mod_timer(&addr_timer, jiffies + ADDR_TIMER_INTERVAL);
 }
@@ -494,12 +499,14 @@ static void
 work_fn_set_soft_bp(struct work_struct *work)
 {
     struct sw_breakpoint *bp;
+    printk("set_soft_bp work started\n");
     mutex_lock(ptext_mutex);
     list_for_each_entry(bp, &sw_breakpoints_active, lst) 
     {
         if (bp->reset_allowed)
         {
             if ((bp->addr != NULL) && !bp->set) {
+                printk("setting breakpoint to %p (%s+0x%x)\n", bp->addr, bp->func_name, bp->offset);
                 bp->orig_byte = *(bp->addr);
                 do_text_poke(bp->addr, &soft_bp, 1);
                 bp->set = 1;
@@ -507,6 +514,7 @@ work_fn_set_soft_bp(struct work_struct *work)
         }
     }
     mutex_unlock(ptext_mutex);
+    printk("set_soft_bp work finished\n");
     kfree(work);
 }
 
@@ -514,6 +522,7 @@ static void
 bp_timer_fn(unsigned long arg)
 {
     struct work_struct *work = NULL;
+    printk("bp_timer started\n");
 
     work = kzalloc(sizeof(*work), GFP_ATOMIC);
     if (work != NULL) {
@@ -525,6 +534,7 @@ bp_timer_fn(unsigned long arg)
     }
     
     mod_timer(&bp_timer, jiffies + BP_TIMER_INTERVAL);
+    printk("bp_timer finished\n");
 }
 
 static int rfinder_detector_notifier_call(struct notifier_block *nb,
@@ -872,6 +882,7 @@ static ssize_t bp_file_write(struct file *filp, const char __user *buf,
                 racehound_add_breakpoint_range(func_name, offset_val);
             }
             found = 1;
+            printk("add/remove complete\n");
         }
     }
     

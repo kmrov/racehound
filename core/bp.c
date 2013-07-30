@@ -13,7 +13,7 @@
 struct perf_event_attr attr;
 
 static struct perf_event * __percpu *racefinder_hbp = NULL; 
-int hwbp_queued = 0, hwbp_set = 0;
+int hwbp_queued = 0, hwbp_set = 0; 
 
 struct hwbp_work *work_set, *work_unset;
 
@@ -38,71 +38,6 @@ struct hwbp_work {
     int enabled;
     struct perf_event_attr attr;
 };
-
-
-struct perf_event * __percpu *
-rfinder_register_wide_hw_breakpoint(struct perf_event_attr *attr,
-			    perf_overflow_handler_t triggered,
-			    void *context)
-{
-	struct perf_event * __percpu *cpu_events, **pevent, *bp;
-	long err;
-	int cpu;
-
-	cpu_events = alloc_percpu(typeof(*cpu_events));
-	if (!cpu_events)
-		return (void __percpu __force *)ERR_PTR(-ENOMEM);
-	get_online_cpus();
-	for_each_online_cpu(cpu) {
-		pevent = per_cpu_ptr(cpu_events, cpu);
-		bp = perf_event_create_kernel_counter(attr, cpu, NULL,
-						      triggered, context);
-		*pevent = bp;
-
-		if (IS_ERR(bp)) {
-			err = PTR_ERR(bp);
-			goto fail;
-		}
-	}
-	put_online_cpus();
-    printk("r9\n");
-	return cpu_events;
-
-fail:
-    printk("rfail\n");
-	for_each_online_cpu(cpu) {
-		pevent = per_cpu_ptr(cpu_events, cpu);
-		if (IS_ERR(*pevent))
-			break;
-		rfinder_unregister_hw_breakpoint(*pevent);
-	}
-	put_online_cpus();
-
-	free_percpu(cpu_events);
-	return (void __percpu __force *)ERR_PTR(err);
-}
-
-void rfinder_unregister_wide_hw_breakpoint(struct perf_event * __percpu *cpu_events)
-{
-	int cpu;
-	struct perf_event **pevent;
-
-	for_each_possible_cpu(cpu) {
-		pevent = per_cpu_ptr(cpu_events, cpu);
-		rfinder_unregister_hw_breakpoint(*pevent);
-	}
-	free_percpu(cpu_events);
-}
-
-void rfinder_unregister_hw_breakpoint(struct perf_event *bp)
-{
-	if (!bp)
-    {
-        printk("uinexistent\n");
-		return;
-    }
-	perf_event_release_kernel(bp);
-}
 
 void racefinder_hbp_handler(struct perf_event *bp,
 			       struct perf_sample_data *data,
@@ -134,6 +69,7 @@ void racefinder_set_hwbp_work(struct work_struct *work)
         }
         
         hwbp_set = 1;
+        printk("register hw breakpoint %lx complete\n", (unsigned long) my_work->attr.bp_addr);
     }
     kfree( (void *)work );
 }
@@ -142,10 +78,12 @@ void racefinder_unset_hwbp_work(struct work_struct *work)
 {
     printk(KERN_INFO "unset_hwbp_work, CPU=%d, task_struct=%p\n", 
     	smp_processor_id(), current);
-    if (hwbp_set)
+    if (hwbp_set || hwbp_queued)
     {
-	hwbp_set = 0;
-	unregister_wide_hw_breakpoint(racefinder_hbp);
+	   hwbp_set = 0;
+	   unregister_wide_hw_breakpoint(racefinder_hbp);
+       printk("unregister hw breakpoint %lx complete\n", (unsigned long) get_cpu_var(*racefinder_hbp)->attr.bp_addr);
+       put_cpu_var(*racefinder_hbp);
     }
     kfree( (void *)work );
 }
@@ -177,8 +115,8 @@ int racefinder_set_hwbp(void *addr)
 
 void racefinder_unset_hwbp(void)
 {
-    if (hwbp_set || hwbp_queued)
-    {
+//    if (hwbp_set || hwbp_queued)
+//    {
     	printk(KERN_INFO 
 		"plan_clear_hwbp: CPU=%d, task_struct=%p\n", 
 		smp_processor_id(), current);
@@ -186,5 +124,5 @@ void racefinder_unset_hwbp(void)
         work_unset = (struct hwbp_work *)kmalloc(sizeof(struct hwbp_work), GFP_KERNEL);
         INIT_WORK((struct work_struct *) work_unset, racefinder_unset_hwbp_work);
         queue_work(wq, (struct work_struct *) work_unset);
-    }
+//    }
 }
