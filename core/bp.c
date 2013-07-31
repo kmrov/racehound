@@ -6,6 +6,7 @@
 #include <linux/percpu.h>
 #include <linux/cpu.h>
 #include <linux/workqueue.h>
+#include <linux/spinlock.h>
 
 #include <linux/smp.h>
 #include <linux/sched.h>
@@ -32,12 +33,17 @@ rhound_register_wide_hw_breakpoint(struct perf_event_attr *attr,
 			    void *context);
 void rhound_unregister_wide_hw_breakpoint(struct perf_event * __percpu *cpu_events);
 
+LIST_HEAD(hw_list);
 
 struct hwbp_work {
     struct work_struct wrk;
     int enabled;
     struct perf_event_attr attr;
 };
+
+DEFINE_SPINLOCK(hw_lock);
+
+extern spinlock_t sw_lock;
 
 void racehound_hbp_handler(struct perf_event *bp,
 			       struct perf_sample_data *data,
@@ -88,7 +94,7 @@ void racehound_unset_hwbp_work(struct work_struct *work)
     kfree( (void *)work );
 }
 
-int racehound_set_hwbp(void *addr)
+int racehound_set_hwbp(struct hw_breakpoint *bp)
 {
     if (!hwbp_set && !hwbp_queued)
     {
@@ -113,7 +119,7 @@ int racehound_set_hwbp(void *addr)
     return 0;
 }
 
-void racehound_unset_hwbp(void)
+void racehound_unset_hwbp(struct hw_breakpoint *bp)
 {
 //    if (hwbp_set || hwbp_queued)
 //    {

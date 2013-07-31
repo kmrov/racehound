@@ -27,6 +27,7 @@
 #include "sections.h"
 #include "functions.h"
 #include "bp.h"
+#include "sw_breakpoints.h"
 
 #include <linux/uaccess.h>
 
@@ -74,40 +75,17 @@ struct swbp_work
     struct sw_breakpoint *bp;
 };
 
-struct sw_breakpoint_range 
-{
-    char *func_name;
-    unsigned int offset;
-    
-    struct list_head lst;
-};
-
-struct sw_breakpoint_available
-{
-    char *func_name;
-    unsigned int offset;
-    short chosen;
-    
-    struct list_head lst;
-};
-
-struct sw_breakpoint 
-{
-    u8 *addr;
-    char *func_name;
-    unsigned int offset;
-    int reset_allowed;
-    int set;
-    u8 orig_byte;
-    
-    struct list_head lst;
-};
+extern struct list_head hw_list;
 
 struct list_head sw_breakpoints_ranges; // sw_breakpoint_range
-struct list_head sw_breakpoints_pool;   // sw_breakpoint_available
+struct list_head sw_breakpoints_pool;   // sw_breakpoint_used
 struct list_head sw_breakpoints_active; // sw_breakpoint
 
 static struct mutex pool_mutex;
+
+static DEFINE_SPINLOCK(sw_lock);
+
+extern spinlock_t hw_lock;
 
 /* ====================================================================== */
 
@@ -150,7 +128,7 @@ static void bp_timer_fn(unsigned long arg);
 static void
 addr_work_fn(struct work_struct *work)
 {
-    struct sw_breakpoint_available *bpavail = NULL;
+    struct sw_breakpoint_used *bpavail = NULL;
     struct sw_breakpoint *bpactive = NULL, *n = NULL;
     int pool_length = 0, count = random_breakpoints_count, i=0, j=0, gen = 1;
     unsigned int random_bp_number;
@@ -264,7 +242,7 @@ void racehound_remove_breakpoint_range(char *func_name, unsigned int offset)
 void racehound_sync_ranges_with_pool(void)
 {
     struct sw_breakpoint_range *bprange = NULL;
-    struct sw_breakpoint_available *bpavail = NULL, *n = NULL;
+    struct sw_breakpoint_used *bpavail = NULL, *n = NULL;
     struct func_with_offsets *func = NULL, *found_func = NULL;
     int i = 0;
     
@@ -427,7 +405,7 @@ static int process_insn(struct insn* insn, void* params)
     }
 }
 
-long decode_and_get_addr(void *insn_addr, struct pt_regs *regs)
+void *decode_and_get_addr(void *insn_addr, struct pt_regs *regs)
 {
     unsigned long ea = 0; // *
     long displacement, immediate;
@@ -475,33 +453,8 @@ long decode_and_get_addr(void *insn_addr, struct pt_regs *regs)
             ea = get_reg_val_by_code(rm, regs) + displacement;
         }
         size = get_operand_size_from_insn_attr(&insn, insn.attr.opnd_type1);
-        val = 1 /*get_value_with_size(ea, size)*/;
-        
-        racehound_changed = 0;
-        
-        racehound_set_hwbp((void *)ea);
-        
-        mdelay(DELAY_MSEC);
-        
-        racehound_unset_hwbp();
-
-        newval = 1 /*get_value_with_size(ea, size)*/ ;
-        if (racehound_changed || (val != newval) )
-        {
-            printk(KERN_INFO 
-            "[DBG] Race detected between accesses to *%p! "
-            "old_val = %lx, new_val = %lx, orig_ip: %pS, "
-            "size = %d, CPU = %d, task_struct = %p\n", 
-            (void *)ea, (unsigned long)val, (unsigned long)newval, 
-            (void *)regs->ip, size,
-            smp_processor_id(), current);
-            
-            atomic_inc(&race_counter);
-        }
-        
-         racehound_changed = 0;
     }
-    return ea;
+    return (void*) ea;
 }
 
 static void 
@@ -516,7 +469,7 @@ work_fn_set_soft_bp(struct work_struct *work)
         {
             if ((bp->addr != NULL) && !bp->set) {
                 printk("setting breakpoint to %p (%s+0x%x)\n", bp->addr, bp->func_name, bp->offset);
-                bp->orig_byte = *(bp->addr);
+                bp->orig_byte = *((u8*)bp->addr);
                 do_text_poke(bp->addr, &soft_bp, 1);
                 bp->set = 1;
             }
@@ -630,45 +583,133 @@ static struct notifier_block detector_nb = {
     .priority = 3, /*Some number*/
 };
 
+struct hw_breakpoint *get_hw_breakpoint(void *ea)
+{
+    struct hw_breakpoint *bp;
+    long flags = 0;
+
+    spin_lock_irqsave(&hw_lock, flags);
+    
+    list_for_each_entry(bp, &hw_list, lst)
+    {
+        if (bp->addr == ea)
+        {
+            break;
+        }
+    }
+    if (&bp->lst == &hw_list)
+    {
+        bp = kzalloc(sizeof(*bp), GFP_KERNEL);
+        INIT_LIST_HEAD(&bp->sw_breakpoints);
+        bp->addr = ea;
+        bp->size = 2;
+        bp->refcount = 1;
+
+        list_add_tail(&bp->lst, &hw_list);
+    }
+    else
+    {
+        bp->refcount++;
+    }
+
+    spin_unlock_irqrestore(&hw_lock, flags);
+
+    return bp;
+}
 
 static int 
 on_soft_bp_triggered(struct die_args *args)
 {
     int ret = NOTIFY_DONE;
-    struct sw_breakpoint *bp;
+    void *ea;
+    struct sw_breakpoint *swbp;
+    struct hw_breakpoint *hwbp;
+    struct hw_sw_relation *rel;
+    long val, newval;
+    short size = 2;
+    unsigned long sw_flags, hw_flags;
     /* [???] 
      * How should we protect the access to 'bp_addr'? A spinlock in 
      * addition to text_mutex? */
-    
-    list_for_each_entry(bp, &sw_breakpoints_active, lst)
-    {
-        if ((bp->addr + 1) == (u8*) args->regs->ip)
-        {
-            ret = NOTIFY_STOP; /* our breakpoint, we will handle it */
-    
-            //<>
-            printk(KERN_INFO 
-                "[Begin] Our software bp at %p; CPU=%d, task_struct=%p\n", 
-                bp->addr, smp_processor_id(), current);
-            //<>
-    
-            /* Another ugly thing. We should lock text_mutex but we are in 
-             * atomic context... */
-            do_text_poke(bp->addr, &bp->orig_byte, 1);
-            args->regs->ip -= 1;
-            bp->set = 0;
-            
-            // Run the engine...
-            decode_and_get_addr((void *)args->regs->ip, args->regs);
-                
-            //<>
-            printk(KERN_INFO 
-                "[End] Our software bp at %p; CPU=%d, task_struct=%p\n", 
-                bp->addr, smp_processor_id(), current);
-            //<>
 
+    spin_lock_irqsave(&sw_lock, sw_flags);
+    
+    list_for_each_entry(swbp, &sw_breakpoints_active, lst)
+    {
+        if ((swbp->addr + 1) == (u8*) args->regs->ip)
+        {
+            break;
         }
     }
+
+    if (&swbp->lst != &sw_breakpoints_active) // Found
+    {
+        ret = NOTIFY_STOP; /* our breakpoint, we will handle it */
+
+        //<>
+        printk(KERN_INFO 
+            "[Begin] Our software bp at %p; CPU=%d, task_struct=%p\n", 
+            swbp->addr, smp_processor_id(), current);
+        //<>
+
+        /* Another ugly thing. We should lock text_mutex but we are in 
+        * atomic context... */
+        do_text_poke(swbp->addr, &swbp->orig_byte, 1);
+        args->regs->ip -= 1;
+        swbp->set = 0;
+
+        // Run the engine...
+        ea = decode_and_get_addr((void *)args->regs->ip, args->regs);
+
+        val = 1 /*get_value_with_size(ea, size)*/;
+
+        racehound_changed = 0;
+
+        hwbp = get_hw_breakpoint(ea);
+
+        spin_lock_irqsave(&hw_lock, hw_flags);
+
+        rel = kzalloc(sizeof(*rel), GFP_KERNEL);
+        rel->sw_breakpoint = swbp;
+        rel->access_type = 0;
+
+        list_add_tail(&rel->lst, &hwbp->sw_breakpoints);
+
+        spin_unlock_irqrestore(&hw_lock, hw_flags);
+
+        racehound_set_hwbp(hwbp);
+
+        mdelay(DELAY_MSEC);
+
+        racehound_unset_hwbp(hwbp);
+
+        newval = 1 /*get_value_with_size(ea, size)*/;
+
+        if (racehound_changed || (val != newval) )
+        {
+            printk(KERN_INFO 
+            "[DBG] Race detected between accesses to *%p! "
+            "old_val = %lx, new_val = %lx, orig_ip: %pS, "
+            "size = %d, CPU = %d, task_struct = %p\n", 
+            (void *)ea, (unsigned long)val, (unsigned long)newval, 
+            (void *)args->regs->ip, size,
+            smp_processor_id(), current);
+
+            atomic_inc(&race_counter);
+        }
+
+        racehound_changed = 0;
+
+
+        //<>
+        printk(KERN_INFO 
+        "[End] Our software bp at %p; CPU=%d, task_struct=%p\n", 
+        swbp->addr, smp_processor_id(), current);
+        //<>
+    }
+
+
+    spin_unlock_irqrestore(&sw_lock, sw_flags);
     
     return ret;
 }
