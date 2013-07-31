@@ -12,25 +12,25 @@
 
 struct perf_event_attr attr;
 
-static struct perf_event * __percpu *racefinder_hbp = NULL; 
+static struct perf_event * __percpu *racehound_hbp = NULL; 
 int hwbp_queued = 0, hwbp_set = 0; 
 
 struct hwbp_work *work_set, *work_unset;
 
 long decode_and_get_addr(void *insn_addr, struct pt_regs *regs);
 
-extern int racefinder_changed;
+extern int racehound_changed;
 
 extern struct workqueue_struct *wq;
 
-void racefinder_unset_hwbp(void);
+void racehound_unset_hwbp(void);
 
-void rfinder_unregister_hw_breakpoint(struct perf_event *bp);
+void rhound_unregister_hw_breakpoint(struct perf_event *bp);
 struct perf_event * __percpu *
-rfinder_register_wide_hw_breakpoint(struct perf_event_attr *attr,
+rhound_register_wide_hw_breakpoint(struct perf_event_attr *attr,
 			    perf_overflow_handler_t triggered,
 			    void *context);
-void rfinder_unregister_wide_hw_breakpoint(struct perf_event * __percpu *cpu_events);
+void rhound_unregister_wide_hw_breakpoint(struct perf_event * __percpu *cpu_events);
 
 
 struct hwbp_work {
@@ -39,23 +39,23 @@ struct hwbp_work {
     struct perf_event_attr attr;
 };
 
-void racefinder_hbp_handler(struct perf_event *bp,
+void racehound_hbp_handler(struct perf_event *bp,
 			       struct perf_sample_data *data,
 			       struct pt_regs *regs)
 {
     printk(KERN_INFO "hwbp handler, CPU=%d, task_struct=%p\n", 
     	smp_processor_id(), current);
-    if (hwbp_set && work_set->enabled)
+    if ((hwbp_set || hwbp_queued) && work_set->enabled)
     {
-        racefinder_changed = 1;
+        racehound_changed = 1;
         printk(KERN_INFO  
-	"[DBG] racefinder_hbp_handler(): "
+	"[DBG] racehound_hbp_handler(): "
 	"access from %pS detected, CPU=%d, task_struct=%p\n", 
 	(void *)regs->ip, smp_processor_id(), current);
     }
 }
 
-void racefinder_set_hwbp_work(struct work_struct *work)
+void racehound_set_hwbp_work(struct work_struct *work)
 {
     struct hwbp_work *my_work = (struct hwbp_work *) work;
     printk(KERN_INFO "set_hwbp_work, CPU=%d, task_struct=%p\n", 
@@ -63,8 +63,8 @@ void racefinder_set_hwbp_work(struct work_struct *work)
     hwbp_queued = 0;
     if (my_work->enabled)
     {
-        racefinder_hbp = register_wide_hw_breakpoint(&(my_work->attr), racefinder_hbp_handler, NULL);
-        if (IS_ERR((void __force *)racefinder_hbp)) {
+        racehound_hbp = register_wide_hw_breakpoint(&(my_work->attr), racehound_hbp_handler, NULL);
+        if (IS_ERR((void __force *)racehound_hbp)) {
             return;
         }
         
@@ -74,30 +74,30 @@ void racefinder_set_hwbp_work(struct work_struct *work)
     kfree( (void *)work );
 }
 
-void racefinder_unset_hwbp_work(struct work_struct *work)
+void racehound_unset_hwbp_work(struct work_struct *work)
 {
     printk(KERN_INFO "unset_hwbp_work, CPU=%d, task_struct=%p\n", 
     	smp_processor_id(), current);
     if (hwbp_set || hwbp_queued)
     {
 	   hwbp_set = 0;
-	   unregister_wide_hw_breakpoint(racefinder_hbp);
-       printk("unregister hw breakpoint %lx complete\n", (unsigned long) get_cpu_var(*racefinder_hbp)->attr.bp_addr);
-       put_cpu_var(*racefinder_hbp);
+	   unregister_wide_hw_breakpoint(racehound_hbp);
+       printk("unregister hw breakpoint %lx complete\n", (unsigned long) get_cpu_var(*racehound_hbp)->attr.bp_addr);
+       put_cpu_var(*racehound_hbp);
     }
     kfree( (void *)work );
 }
 
-int racefinder_set_hwbp(void *addr)
+int racehound_set_hwbp(void *addr)
 {
     if (!hwbp_set && !hwbp_queued)
     {
         printk(KERN_INFO 
         	"plan_set_hwbp: handler address: %p, CPU=%d, task_struct=%p\n", 
-        	&racefinder_hbp_handler, 
+        	&racehound_hbp_handler, 
     		smp_processor_id(), current);
         work_set = (struct hwbp_work *)kmalloc(sizeof(struct hwbp_work), GFP_KERNEL);
-        INIT_WORK((struct work_struct *) work_set, racefinder_set_hwbp_work);
+        INIT_WORK((struct work_struct *) work_set, racehound_set_hwbp_work);
 
         hw_breakpoint_init(&(work_set->attr));
         work_set->attr.bp_addr = (unsigned long)addr;
@@ -113,7 +113,7 @@ int racefinder_set_hwbp(void *addr)
     return 0;
 }
 
-void racefinder_unset_hwbp(void)
+void racehound_unset_hwbp(void)
 {
 //    if (hwbp_set || hwbp_queued)
 //    {
@@ -122,7 +122,7 @@ void racefinder_unset_hwbp(void)
 		smp_processor_id(), current);
         work_set->enabled = 0;
         work_unset = (struct hwbp_work *)kmalloc(sizeof(struct hwbp_work), GFP_KERNEL);
-        INIT_WORK((struct work_struct *) work_unset, racefinder_unset_hwbp_work);
+        INIT_WORK((struct work_struct *) work_unset, racehound_unset_hwbp_work);
         queue_work(wq, (struct work_struct *) work_unset);
 //    }
 }

@@ -51,7 +51,7 @@ struct dentry *bp_file = NULL;
 
 struct workqueue_struct *wq;
 
-int racefinder_changed = 0;
+int racehound_changed = 0;
 
 extern struct list_head tmod_funcs;
 
@@ -125,7 +125,7 @@ module_param(random_breakpoints_count, int, S_IRUGO);
 static unsigned int bp_offset = 0x11;
 module_param(bp_offset, int, S_IRUGO);
 
-#define BP_TIMER_INTERVAL (HZ / 2) /* 0.5 sec expressed in jiffies */
+#define BP_TIMER_INTERVAL (HZ / 4) /* 0.25 sec expressed in jiffies */
 
 /* Fires each BP_TIMER_INTERVAL jiffies (or more), resets the sw bp if 
  * needed. */
@@ -269,6 +269,9 @@ void racehound_sync_ranges_with_pool(void)
     int i = 0;
     
     mutex_lock(&pool_mutex);
+
+    printk("started sync ranges with pool\n");
+
     list_for_each_entry_safe(bpavail, n, &sw_breakpoints_pool, lst)
     {
         list_del(&bpavail->lst);
@@ -324,6 +327,12 @@ void racehound_sync_ranges_with_pool(void)
                 }
             }
         }
+    }
+
+    printk("synced ranges with pool\n");
+    list_for_each_entry_safe(bpavail, n, &sw_breakpoints_pool, lst)
+    {
+        printk("breakpoint: %s+0x%x\n", bpavail->func_name, bpavail->offset);
     }
     
     mutex_unlock(&pool_mutex);
@@ -468,16 +477,16 @@ long decode_and_get_addr(void *insn_addr, struct pt_regs *regs)
         size = get_operand_size_from_insn_attr(&insn, insn.attr.opnd_type1);
         val = 1 /*get_value_with_size(ea, size)*/;
         
-        racefinder_changed = 0;
+        racehound_changed = 0;
         
-        racefinder_set_hwbp((void *)ea);
+        racehound_set_hwbp((void *)ea);
         
         mdelay(DELAY_MSEC);
         
-        racefinder_unset_hwbp();
+        racehound_unset_hwbp();
 
         newval = 1 /*get_value_with_size(ea, size)*/ ;
-        if (racefinder_changed || (val != newval) )
+        if (racehound_changed || (val != newval) )
         {
             printk(KERN_INFO 
             "[DBG] Race detected between accesses to *%p! "
@@ -490,7 +499,7 @@ long decode_and_get_addr(void *insn_addr, struct pt_regs *regs)
             atomic_inc(&race_counter);
         }
         
-         racefinder_changed = 0;
+         racehound_changed = 0;
     }
     return ea;
 }
@@ -537,7 +546,7 @@ bp_timer_fn(unsigned long arg)
     printk("bp_timer finished\n");
 }
 
-static int rfinder_detector_notifier_call(struct notifier_block *nb,
+static int rhound_detector_notifier_call(struct notifier_block *nb,
     unsigned long mod_state, void *vmod)
 {
     struct kedr_tmod_function *pos;
@@ -603,7 +612,7 @@ static int rfinder_detector_notifier_call(struct notifier_block *nb,
                 // No need to unset the sw breakpoint, the 
                 // code where it is set will no longer be 
                 // able to execute.
-                //racefinder_unset_breakpoint();
+                //racehound_unset_breakpoint();
                 
                 target_module = NULL;
                 printk("hello unload detected\n");
@@ -616,7 +625,7 @@ static int rfinder_detector_notifier_call(struct notifier_block *nb,
 }
 
 static struct notifier_block detector_nb = {
-    .notifier_call = rfinder_detector_notifier_call,
+    .notifier_call = rhound_detector_notifier_call,
     .next = NULL,
     .priority = 3, /*Some number*/
 };
@@ -906,7 +915,7 @@ struct file_operations bp_file_ops = {
 };
 
 
-static int __init racefinder_module_init(void)
+static int __init racehound_module_init(void)
 {
     int ret = 0;
     
@@ -948,8 +957,8 @@ static int __init racefinder_module_init(void)
     
     // TODO: check result
     register_module_notifier(&detector_nb);
-    printk("rfinder =========================================\n");
-    printk("rfinder loaded\n");
+    printk("rhound =========================================\n");
+    printk("rhound loaded\n");
     
     ret = register_die_notifier(&die_nb);
     if (ret != 0)
@@ -1013,7 +1022,7 @@ out:
     return ret;
 }
 
-static void __exit racefinder_module_exit(void)
+static void __exit racehound_module_exit(void)
 {
     printk("exit\n");
     flush_workqueue( wq );
@@ -1034,14 +1043,14 @@ static void __exit racefinder_module_exit(void)
     del_timer_sync(&addr_timer);
     printk("deleted timers\n");
     
-    // racefinder_unset_breakpoint();
+    // racehound_unset_breakpoint();
     
     //<>
     unregister_die_notifier(&die_nb);
     //<>
-    printk("rfinder unloaded\n");
+    printk("rhound unloaded\n");
 }
 
-module_init(racefinder_module_init);
-module_exit(racefinder_module_exit);
+module_init(racehound_module_init);
+module_exit(racehound_module_exit);
 MODULE_LICENSE("GPL");
