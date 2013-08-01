@@ -215,18 +215,24 @@ addr_timer_fn(unsigned long arg)
 
 void racehound_add_breakpoint_range(char *func_name, unsigned int offset)
 {
-    struct sw_breakpoint_range *range = kzalloc(sizeof(struct sw_breakpoint_range), GFP_KERNEL);
+    long flags;
+    struct sw_breakpoint_range *range;
+    spin_lock_irqsave(&sw_lock, flags);
+    range = kzalloc(sizeof(struct sw_breakpoint_range), GFP_KERNEL);
     range->offset = offset;
     range->func_name = kzalloc(strlen(func_name)+1, GFP_KERNEL);
     strcpy(range->func_name, func_name);
     INIT_LIST_HEAD(&range->lst);
     list_add_tail(&range->lst, &sw_breakpoints_ranges);
     racehound_sync_ranges_with_pool();
+    spin_unlock_irqrestore(&sw_lock, flags);
 }
 
 void racehound_remove_breakpoint_range(char *func_name, unsigned int offset)
 {
+    long flags;
     struct sw_breakpoint_range *pos = NULL, *n = NULL;
+    spin_lock_irqsave(&sw_lock, flags);
     list_for_each_entry_safe(pos, n, &sw_breakpoints_ranges, lst) 
     {
         if ( (strcmp(pos->func_name, func_name) == 0) && (pos->offset == offset) )
@@ -237,6 +243,7 @@ void racehound_remove_breakpoint_range(char *func_name, unsigned int offset)
         }
     }
     racehound_sync_ranges_with_pool();
+    spin_unlock_irqrestore(&sw_lock, flags);
 }
 
 void racehound_sync_ranges_with_pool(void)
@@ -322,6 +329,8 @@ int racehound_add_breakpoint(char *func_name, unsigned int offset)
     struct func_with_offsets *pos;
     struct sw_breakpoint *swbp = kzalloc(sizeof(struct sw_breakpoint), GFP_KERNEL);
     int found = 0;
+    long flags;
+    spin_lock_irqsave(&sw_lock, flags);
     list_for_each_entry(pos, &funcs_with_offsets, lst) 
     {
         if ( (strcmp(pos->func_name, func_name) == 0) )
@@ -342,13 +351,16 @@ int racehound_add_breakpoint(char *func_name, unsigned int offset)
     {
         kfree(swbp);
     }
+    spin_unlock_irqrestore(&sw_lock, flags);
     return !found;
 }
 
 /* Should be called with text_mutex locked */
 void racehound_remove_breakpoint(char *func_name, unsigned int offset)
 {
+    long flags;
     struct sw_breakpoint *pos = NULL;
+    spin_lock_irqsave(&sw_lock, flags);
     list_for_each_entry(pos, &sw_breakpoints_active, lst) 
     {
         if ( (strcmp(pos->func_name, func_name) == 0) && (pos->offset == offset) )
@@ -364,6 +376,7 @@ void racehound_remove_breakpoint(char *func_name, unsigned int offset)
             break;
         }
     }
+    spin_unlock_irqrestore(&sw_lock, flags);
 }
 
 
@@ -460,9 +473,11 @@ void *decode_and_get_addr(void *insn_addr, struct pt_regs *regs)
 static void 
 work_fn_set_soft_bp(struct work_struct *work)
 {
+    long flags;
     struct sw_breakpoint *bp;
     printk("set_soft_bp work started\n");
     mutex_lock(ptext_mutex);
+    spin_lock_irqsave(&sw_lock, flags);
     list_for_each_entry(bp, &sw_breakpoints_active, lst) 
     {
         if (bp->reset_allowed)
@@ -475,6 +490,7 @@ work_fn_set_soft_bp(struct work_struct *work)
             }
         }
     }
+    spin_unlock_irqrestore(&sw_lock, flags);
     mutex_unlock(ptext_mutex);
     printk("set_soft_bp work finished\n");
     kfree(work);
@@ -507,6 +523,7 @@ static int rhound_detector_notifier_call(struct notifier_block *nb,
     struct sw_breakpoint *bp;
     int ret = 0/*, i = 0*/;
     struct module* mod = (struct module *)vmod;
+    long flags;
     BUG_ON(mod == NULL);
     
     switch(mod_state)
@@ -541,7 +558,9 @@ static int rhound_detector_notifier_call(struct notifier_block *nb,
                                        &process_insn, func);
                     list_add_tail(&func->lst, &funcs_with_offsets);
                 }
+                spin_lock_irqsave(&sw_lock, flags);
                 racehound_sync_ranges_with_pool();
+                spin_unlock_irqrestore(&sw_lock, flags);
                 smp_wmb();
                 addr_timer_fn(0);
                 bp_timer_fn(0);
@@ -557,10 +576,14 @@ static int rhound_detector_notifier_call(struct notifier_block *nb,
                 del_timer_sync(&bp_timer);
                 del_timer_sync(&addr_timer);
 
+                spin_lock_irqsave(&sw_lock, flags);
+
                 list_for_each_entry(bp, &sw_breakpoints_active, lst)
                 {
                     bp->reset_allowed = 0;
                 }
+
+                spin_unlock_irqrestore(&sw_lock, flags);
                 
                 // No need to unset the sw breakpoint, the 
                 // code where it is set will no longer be 

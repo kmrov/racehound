@@ -10,6 +10,7 @@
 
 #include <linux/smp.h>
 #include <linux/sched.h>
+#include "bp.h"
 
 struct perf_event_attr attr;
 
@@ -24,7 +25,7 @@ extern int racehound_changed;
 
 extern struct workqueue_struct *wq;
 
-void racehound_unset_hwbp(struct hw_breakpoint *);
+void racehound_unset_hwbp(struct hw_breakpoint *bp);
 
 void rhound_unregister_hw_breakpoint(struct perf_event *bp);
 struct perf_event * __percpu *
@@ -106,7 +107,7 @@ int racehound_set_hwbp(struct hw_breakpoint *bp)
         INIT_WORK((struct work_struct *) work_set, racehound_set_hwbp_work);
 
         hw_breakpoint_init(&(work_set->attr));
-        work_set->attr.bp_addr = (unsigned long)addr;
+        work_set->attr.bp_addr = (unsigned long)bp->addr;
         work_set->attr.bp_len = HW_BREAKPOINT_LEN_4;
         work_set->attr.bp_type = HW_BREAKPOINT_W | HW_BREAKPOINT_R;
         work_set->enabled = 1;
