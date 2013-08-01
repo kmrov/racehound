@@ -218,9 +218,9 @@ void racehound_add_breakpoint_range(char *func_name, unsigned int offset)
     long flags;
     struct sw_breakpoint_range *range;
     spin_lock_irqsave(&sw_lock, flags);
-    range = kzalloc(sizeof(struct sw_breakpoint_range), GFP_KERNEL);
+    range = kzalloc(sizeof(struct sw_breakpoint_range), GFP_ATOMIC);
     range->offset = offset;
-    range->func_name = kzalloc(strlen(func_name)+1, GFP_KERNEL);
+    range->func_name = kzalloc(strlen(func_name)+1, GFP_ATOMIC);
     strcpy(range->func_name, func_name);
     INIT_LIST_HEAD(&range->lst);
     list_add_tail(&range->lst, &sw_breakpoints_ranges);
@@ -277,9 +277,9 @@ void racehound_sync_ranges_with_pool(void)
             }
             if (bprange->offset)
             {
-                bpavail = kzalloc(sizeof(*bpavail), GFP_KERNEL);
+                bpavail = kzalloc(sizeof(*bpavail), GFP_ATOMIC);
                 bpavail->offset = bprange->offset;
-                bpavail->func_name = kzalloc(strlen(bprange->func_name)+1, GFP_KERNEL);
+                bpavail->func_name = kzalloc(strlen(bprange->func_name)+1, GFP_ATOMIC);
                 strcpy(bpavail->func_name, bprange->func_name);
                 INIT_LIST_HEAD(&bpavail->lst);
                 list_add_tail(&bpavail->lst, &sw_breakpoints_pool);
@@ -288,9 +288,9 @@ void racehound_sync_ranges_with_pool(void)
             {
                 for (i = 0; i < found_func->offsets_len; i++)
                 {
-                    bpavail = kzalloc(sizeof(*bpavail), GFP_KERNEL);
+                    bpavail = kzalloc(sizeof(*bpavail), GFP_ATOMIC);
                     bpavail->offset = found_func->offsets[i];
-                    bpavail->func_name = kzalloc(strlen(bprange->func_name)+1, GFP_KERNEL);
+                    bpavail->func_name = kzalloc(strlen(bprange->func_name)+1, GFP_ATOMIC);
                     strcpy(bpavail->func_name, bprange->func_name);
                     INIT_LIST_HEAD(&bpavail->lst);
                     list_add_tail(&bpavail->lst, &sw_breakpoints_pool);
@@ -303,9 +303,9 @@ void racehound_sync_ranges_with_pool(void)
             {
                 for (i = 0; i < func->offsets_len; i++)
                 {
-                    bpavail = kzalloc(sizeof(*bpavail), GFP_KERNEL);
+                    bpavail = kzalloc(sizeof(*bpavail), GFP_ATOMIC);
                     bpavail->offset = found_func->offsets[i];
-                    bpavail->func_name = kzalloc(strlen(bprange->func_name)+1, GFP_KERNEL);
+                    bpavail->func_name = kzalloc(strlen(bprange->func_name)+1, GFP_ATOMIC);
                     strcpy(bpavail->func_name, bprange->func_name);
                     INIT_LIST_HEAD(&bpavail->lst);
                     list_add_tail(&bpavail->lst, &sw_breakpoints_pool);
@@ -337,7 +337,7 @@ int racehound_add_breakpoint(char *func_name, unsigned int offset)
         {
             swbp->addr = (u8 *)pos->addr + offset;
             swbp->reset_allowed = 1;
-            swbp->func_name = kzalloc(strlen(func_name)+1, GFP_KERNEL);
+            swbp->func_name = kzalloc(strlen(func_name)+1, GFP_ATOMIC);
             strcpy(swbp->func_name, func_name);
             swbp->offset = offset;
             swbp->set = 0;
@@ -622,7 +622,7 @@ struct hw_breakpoint *get_hw_breakpoint(void *ea)
     }
     if (&bp->lst == &hw_list)
     {
-        bp = kzalloc(sizeof(*bp), GFP_KERNEL);
+        bp = kzalloc(sizeof(*bp), GFP_ATOMIC);
         INIT_LIST_HEAD(&bp->sw_breakpoints);
         bp->addr = ea;
         bp->size = 2;
@@ -692,7 +692,7 @@ on_soft_bp_triggered(struct die_args *args)
 
         spin_lock_irqsave(&hw_lock, hw_flags);
 
-        rel = kzalloc(sizeof(*rel), GFP_KERNEL);
+        rel = kzalloc(sizeof(*rel), GFP_ATOMIC);
         rel->bp = swbp;
         rel->access_type = 0;
 
@@ -834,6 +834,8 @@ static int bp_file_open(struct inode *inode, struct file *filp)
     struct sw_breakpoint *bp;
     char *bp_list = NULL, *list_tmp = NULL;
     int list_len = 0, entry_len = 0;
+    long flags;
+    spin_lock_irqsave(&sw_lock, flags);
     list_for_each_entry(bp, &sw_breakpoints_active, lst) 
     {
         if (bp->set)
@@ -842,7 +844,7 @@ static int bp_file_open(struct inode *inode, struct file *filp)
                                                        bp->offset);
         }
     }
-    bp_list = kmalloc(list_len+1, GFP_KERNEL);
+    bp_list = kmalloc(list_len+1, GFP_ATOMIC);
     if (bp_list == NULL)
     {
         return -ENOMEM;
@@ -860,6 +862,7 @@ static int bp_file_open(struct inode *inode, struct file *filp)
             list_tmp += entry_len;
         }
     }
+    spin_unlock_irqrestore(&sw_lock, flags);
     bp_list[list_len] = '\0';
     filp->private_data = bp_list;
     return 0;
