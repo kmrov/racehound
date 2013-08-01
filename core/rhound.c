@@ -215,7 +215,7 @@ addr_timer_fn(unsigned long arg)
 
 void racehound_add_breakpoint_range(char *func_name, unsigned int offset)
 {
-    long flags;
+    unsigned long flags;
     struct sw_breakpoint_range *range;
     spin_lock_irqsave(&sw_lock, flags);
     range = kzalloc(sizeof(struct sw_breakpoint_range), GFP_ATOMIC);
@@ -230,7 +230,7 @@ void racehound_add_breakpoint_range(char *func_name, unsigned int offset)
 
 void racehound_remove_breakpoint_range(char *func_name, unsigned int offset)
 {
-    long flags;
+    unsigned long flags;
     struct sw_breakpoint_range *pos = NULL, *n = NULL;
     spin_lock_irqsave(&sw_lock, flags);
     list_for_each_entry_safe(pos, n, &sw_breakpoints_ranges, lst) 
@@ -246,6 +246,7 @@ void racehound_remove_breakpoint_range(char *func_name, unsigned int offset)
     spin_unlock_irqrestore(&sw_lock, flags);
 }
 
+// Should be called with sw_lock locked
 void racehound_sync_ranges_with_pool(void)
 {
     struct sw_breakpoint_range *bprange = NULL;
@@ -329,7 +330,7 @@ int racehound_add_breakpoint(char *func_name, unsigned int offset)
     struct func_with_offsets *pos;
     struct sw_breakpoint *swbp = kzalloc(sizeof(struct sw_breakpoint), GFP_KERNEL);
     int found = 0;
-    long flags;
+    unsigned long flags;
     spin_lock_irqsave(&sw_lock, flags);
     list_for_each_entry(pos, &funcs_with_offsets, lst) 
     {
@@ -358,7 +359,7 @@ int racehound_add_breakpoint(char *func_name, unsigned int offset)
 /* Should be called with text_mutex locked */
 void racehound_remove_breakpoint(char *func_name, unsigned int offset)
 {
-    long flags;
+    unsigned long flags;
     struct sw_breakpoint *pos = NULL;
     spin_lock_irqsave(&sw_lock, flags);
     list_for_each_entry(pos, &sw_breakpoints_active, lst) 
@@ -422,7 +423,6 @@ void *decode_and_get_addr(void *insn_addr, struct pt_regs *regs)
 {
     unsigned long ea = 0; // *
     long displacement, immediate;
-    long long val, newval;
     struct insn insn;
     int mod, reg, rm, ss, index, base, rex_r, rex_x, rex_b, size;
 
@@ -473,7 +473,7 @@ void *decode_and_get_addr(void *insn_addr, struct pt_regs *regs)
 static void 
 work_fn_set_soft_bp(struct work_struct *work)
 {
-    long flags;
+    unsigned long flags;
     struct sw_breakpoint *bp;
     printk("set_soft_bp work started\n");
     mutex_lock(ptext_mutex);
@@ -523,7 +523,7 @@ static int rhound_detector_notifier_call(struct notifier_block *nb,
     struct sw_breakpoint *bp;
     int ret = 0/*, i = 0*/;
     struct module* mod = (struct module *)vmod;
-    long flags;
+    unsigned long flags;
     BUG_ON(mod == NULL);
     
     switch(mod_state)
@@ -609,7 +609,7 @@ static struct notifier_block detector_nb = {
 struct hw_breakpoint *get_hw_breakpoint(void *ea)
 {
     struct hw_breakpoint *bp;
-    long flags = 0;
+    unsigned long flags = 0;
 
     spin_lock_irqsave(&hw_lock, flags);
     
@@ -834,7 +834,7 @@ static int bp_file_open(struct inode *inode, struct file *filp)
     struct sw_breakpoint *bp;
     char *bp_list = NULL, *list_tmp = NULL;
     int list_len = 0, entry_len = 0;
-    long flags;
+    unsigned long flags;
     spin_lock_irqsave(&sw_lock, flags);
     list_for_each_entry(bp, &sw_breakpoints_active, lst) 
     {
