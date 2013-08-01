@@ -655,6 +655,7 @@ on_soft_bp_triggered(struct die_args *args)
     struct hw_breakpoint *hwbp;
     struct hw_sw_relation *rel;
     unsigned long sw_flags, hw_flags;
+    short setting_bp = 0;
     /* [???] 
      * How should we protect the access to 'bp_addr'? A spinlock in 
      * addition to text_mutex? */
@@ -692,17 +693,27 @@ on_soft_bp_triggered(struct die_args *args)
 
         spin_lock_irqsave(&hw_lock, hw_flags);
         hwbp = get_hw_breakpoint(ea);
+        if (list_empty_careful(&hwbp->sw_breakpoints))
+        {
+            setting_bp = 1;
+        }
         rel = kzalloc(sizeof(*rel), GFP_ATOMIC);
         rel->bp = swbp;
         rel->access_type = 0;
         list_add_tail(&rel->lst, &hwbp->sw_breakpoints);
         spin_unlock_irqrestore(&hw_lock, hw_flags);
 
-        racehound_set_hwbp(hwbp);
+        if (setting_bp)
+        {
+            racehound_set_hwbp(hwbp);
+        }
 
         mdelay(DELAY_MSEC);
 
-        racehound_unset_hwbp(hwbp);
+        if (setting_bp)
+        {
+            racehound_unset_hwbp(hwbp);
+        }
 
         spin_lock_irqsave(&hw_lock, hw_flags);
         list_del(&rel->lst);
