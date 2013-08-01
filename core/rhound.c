@@ -606,13 +606,11 @@ static struct notifier_block detector_nb = {
     .priority = 3, /*Some number*/
 };
 
+// should be called with hw_lock locked
 struct hw_breakpoint *get_hw_breakpoint(void *ea)
 {
     struct hw_breakpoint *bp;
-    unsigned long flags = 0;
 
-    spin_lock_irqsave(&hw_lock, flags);
-    
     list_for_each_entry(bp, &hw_list, lst)
     {
         if (bp->addr == ea)
@@ -635,9 +633,17 @@ struct hw_breakpoint *get_hw_breakpoint(void *ea)
         bp->refcount++;
     }
 
-    spin_unlock_irqrestore(&hw_lock, flags);
-
     return bp;
+}
+
+// should be called with hw_lock locked
+void put_hw_breakpoint(struct hw_breakpoint *bp)
+{
+    bp->refcount--;
+    if (bp->refcount == 0)
+    {
+        kfree(bp);
+    }
 }
 
 static int 
@@ -648,8 +654,6 @@ on_soft_bp_triggered(struct die_args *args)
     struct sw_breakpoint *swbp;
     struct hw_breakpoint *hwbp;
     struct hw_sw_relation *rel;
-    long val, newval;
-    short size = 2;
     unsigned long sw_flags, hw_flags;
     /* [???] 
      * How should we protect the access to 'bp_addr'? A spinlock in 
@@ -684,20 +688,14 @@ on_soft_bp_triggered(struct die_args *args)
         // Run the engine...
         ea = decode_and_get_addr((void *)args->regs->ip, args->regs);
 
-        val = 1 /*get_value_with_size(ea, size)*/;
-
         racehound_changed = 0;
 
-        hwbp = get_hw_breakpoint(ea);
-
         spin_lock_irqsave(&hw_lock, hw_flags);
-
+        hwbp = get_hw_breakpoint(ea);
         rel = kzalloc(sizeof(*rel), GFP_ATOMIC);
         rel->bp = swbp;
         rel->access_type = 0;
-
         list_add_tail(&rel->lst, &hwbp->sw_breakpoints);
-
         spin_unlock_irqrestore(&hw_lock, hw_flags);
 
         racehound_set_hwbp(hwbp);
@@ -706,23 +704,11 @@ on_soft_bp_triggered(struct die_args *args)
 
         racehound_unset_hwbp(hwbp);
 
-        newval = 1 /*get_value_with_size(ea, size)*/;
-
-        if (racehound_changed || (val != newval) )
-        {
-            printk(KERN_INFO 
-            "[DBG] Race detected between accesses to *%p! "
-            "old_val = %lx, new_val = %lx, orig_ip: %pS, "
-            "size = %d, CPU = %d, task_struct = %p\n", 
-            (void *)ea, (unsigned long)val, (unsigned long)newval, 
-            (void *)args->regs->ip, size,
-            smp_processor_id(), current);
-
-            atomic_inc(&race_counter);
-        }
-
-        racehound_changed = 0;
-
+        spin_lock_irqsave(&hw_lock, hw_flags);
+        list_del(&rel->lst);
+        kfree(rel);
+        put_hw_breakpoint(hwbp);
+        spin_unlock_irqrestore(&hw_lock, hw_flags);
 
         //<>
         printk(KERN_INFO 
