@@ -9,7 +9,7 @@ void racehound_unregister_breakpoint(void);
 void racehound_set_breakpoint_addr(void *addr);
 
 struct hw_breakpoint {
-    struct perf_event * __percpu *perfevent;
+    struct perf_event * __percpu *event;
     struct perf_event_attr *attr;
     void *addr;
     short size;

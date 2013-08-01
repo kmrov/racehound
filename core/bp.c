@@ -12,11 +12,6 @@
 #include <linux/sched.h>
 #include "bp.h"
 
-struct perf_event_attr attr;
-
-static struct perf_event * __percpu *racehound_hbp = NULL; 
-int hwbp_queued = 0, hwbp_set = 0; 
-
 long decode_and_get_addr(void *insn_addr, struct pt_regs *regs);
 
 extern struct workqueue_struct *wq;
@@ -55,8 +50,8 @@ void racehound_set_hwbp_work(struct work_struct *work)
     struct hwbp_work *my_work = (struct hwbp_work *) work;
     printk(KERN_INFO "set_hwbp_work, CPU=%d, task_struct=%p\n", 
         smp_processor_id(), current);
-    racehound_hbp = register_wide_hw_breakpoint(my_work->bp->attr, racehound_hbp_handler, NULL);
-    if (IS_ERR((void __force *)racehound_hbp)) {
+    my_work->bp->event = register_wide_hw_breakpoint(my_work->bp->attr, racehound_hbp_handler, NULL);
+    if (IS_ERR((void __force *)my_work->bp->event)) {
         return;
     }
     
@@ -70,7 +65,7 @@ void racehound_unset_hwbp_work(struct work_struct *work)
     printk(KERN_INFO "unset_hwbp_work, CPU=%d, task_struct=%p\n", 
         smp_processor_id(), current);
 
-    unregister_wide_hw_breakpoint(racehound_hbp);
+    unregister_wide_hw_breakpoint(my_work->bp->event);
     printk("unregister hw breakpoint %p complete\n", my_work->bp->addr);
     kfree(my_work->bp->attr);
     kfree( (void *)work );
