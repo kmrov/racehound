@@ -8,9 +8,6 @@ void racehound_unset_breakpoint(void);
 void racehound_unregister_breakpoint(void);
 void racehound_set_breakpoint_addr(void *addr);
 
-int racehound_set_hwbp(void *addr);
-void racehound_unset_hwbp(void);
-
 struct hw_breakpoint {
     struct perf_event * __percpu *perfevent;
     void *addr;
@@ -27,5 +24,8 @@ struct hw_sw_relation {
 
     struct list_head lst;
 };
+
+int racehound_set_hwbp(struct hw_breakpoint *);
+void racehound_unset_hwbp(struct hw_breakpoint *);
 
 #endif

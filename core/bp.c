@@ -24,7 +24,7 @@ extern int racehound_changed;
 
 extern struct workqueue_struct *wq;
 
-void racehound_unset_hwbp(void);
+void racehound_unset_hwbp(struct hw_breakpoint *);
 
 void rhound_unregister_hw_breakpoint(struct perf_event *bp);
 struct perf_event * __percpu *

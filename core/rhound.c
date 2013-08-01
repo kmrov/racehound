@@ -670,7 +670,7 @@ on_soft_bp_triggered(struct die_args *args)
         spin_lock_irqsave(&hw_lock, hw_flags);
 
         rel = kzalloc(sizeof(*rel), GFP_KERNEL);
-        rel->sw_breakpoint = swbp;
+        rel->bp = swbp;
         rel->access_type = 0;
 
         list_add_tail(&rel->lst, &hwbp->sw_breakpoints);
