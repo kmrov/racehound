@@ -46,7 +46,7 @@ const char *debugfs_dir_name = "rhound";
 
 /* Counter for races found */
 struct dentry *race_counter_file = NULL;
-static atomic_t race_counter = ATOMIC_INIT(0);
+atomic_t race_counter = ATOMIC_INIT(0);
 
 struct dentry *bp_file = NULL;
 
@@ -80,8 +80,6 @@ extern struct list_head hw_list;
 struct list_head sw_breakpoints_ranges; // sw_breakpoint_range
 struct list_head sw_breakpoints_pool;   // sw_breakpoint_used
 struct list_head sw_breakpoints_active; // sw_breakpoint
-
-static struct mutex pool_mutex;
 
 static DEFINE_SPINLOCK(sw_lock);
 
@@ -132,12 +130,13 @@ addr_work_fn(struct work_struct *work)
     struct sw_breakpoint *bpactive = NULL, *n = NULL;
     int pool_length = 0, count = random_breakpoints_count, i=0, j=0, gen = 1;
     unsigned int random_bp_number;
+    unsigned long flags;
     
     printk("addr_work_fn started\n");
 
-    mutex_lock(&pool_mutex);
     mutex_lock(ptext_mutex);
-    
+    spin_lock_irqsave(&sw_lock, flags);
+
     list_for_each_entry_safe(bpactive, n, &sw_breakpoints_active, lst) 
     {
         if (bpactive->addr != NULL && bpactive->set) 
@@ -187,8 +186,9 @@ addr_work_fn(struct work_struct *work)
         }
     }
 
+    spin_unlock_irqrestore(&sw_lock, flags);
     mutex_unlock(ptext_mutex);
-    mutex_unlock(&pool_mutex);
+
     bp_timer_fn(0);
     kfree(work);
     printk("addr_work_fn finished\n");
@@ -254,8 +254,6 @@ void racehound_sync_ranges_with_pool(void)
     struct func_with_offsets *func = NULL, *found_func = NULL;
     int i = 0;
     
-    mutex_lock(&pool_mutex);
-
     printk("started sync ranges with pool\n");
 
     list_for_each_entry_safe(bpavail, n, &sw_breakpoints_pool, lst)
@@ -320,18 +318,14 @@ void racehound_sync_ranges_with_pool(void)
     {
         printk("breakpoint: %s+0x%x\n", bpavail->func_name, bpavail->offset);
     }
-    
-    mutex_unlock(&pool_mutex);
 }
 
-/* Should be called with text_mutex locked */
+/* Should be called with text_mutex and sw_lock locked */
 int racehound_add_breakpoint(char *func_name, unsigned int offset)
 {
     struct func_with_offsets *pos;
     struct sw_breakpoint *swbp = kzalloc(sizeof(struct sw_breakpoint), GFP_KERNEL);
     int found = 0;
-    unsigned long flags;
-    spin_lock_irqsave(&sw_lock, flags);
     list_for_each_entry(pos, &funcs_with_offsets, lst) 
     {
         if ( (strcmp(pos->func_name, func_name) == 0) )
@@ -352,7 +346,6 @@ int racehound_add_breakpoint(char *func_name, unsigned int offset)
     {
         kfree(swbp);
     }
-    spin_unlock_irqrestore(&sw_lock, flags);
     return !found;
 }
 
@@ -466,6 +459,10 @@ void *decode_and_get_addr(void *insn_addr, struct pt_regs *regs)
             ea = get_reg_val_by_code(rm, regs) + displacement;
         }
         size = get_operand_size_from_insn_attr(&insn, insn.attr.opnd_type1);
+    }
+    else
+    {
+        BUG_ON(1);
     }
     return (void*) ea;
 }
@@ -606,46 +603,6 @@ static struct notifier_block detector_nb = {
     .priority = 3, /*Some number*/
 };
 
-// should be called with hw_lock locked
-struct hw_breakpoint *get_hw_breakpoint(void *ea)
-{
-    struct hw_breakpoint *bp;
-
-    list_for_each_entry(bp, &hw_list, lst)
-    {
-        if (bp->addr == ea)
-        {
-            break;
-        }
-    }
-    if (&bp->lst == &hw_list)
-    {
-        bp = kzalloc(sizeof(*bp), GFP_ATOMIC);
-        INIT_LIST_HEAD(&bp->sw_breakpoints);
-        bp->addr = ea;
-        bp->size = 2;
-        bp->refcount = 1;
-
-        list_add_tail(&bp->lst, &hw_list);
-    }
-    else
-    {
-        bp->refcount++;
-    }
-
-    return bp;
-}
-
-// should be called with hw_lock locked
-void put_hw_breakpoint(struct hw_breakpoint *bp)
-{
-    bp->refcount--;
-    if (bp->refcount == 0)
-    {
-        kfree(bp);
-    }
-}
-
 static int 
 on_soft_bp_triggered(struct die_args *args)
 {
@@ -655,7 +612,6 @@ on_soft_bp_triggered(struct die_args *args)
     struct hw_breakpoint *hwbp;
     struct hw_sw_relation *rel;
     unsigned long sw_flags, hw_flags;
-    short setting_bp = 0;
     /* [???] 
      * How should we protect the access to 'bp_addr'? A spinlock in 
      * addition to text_mutex? */
@@ -692,33 +648,20 @@ on_soft_bp_triggered(struct die_args *args)
         racehound_changed = 0;
 
         spin_lock_irqsave(&hw_lock, hw_flags);
-        hwbp = get_hw_breakpoint(ea);
-        if (list_empty_careful(&hwbp->sw_breakpoints))
-        {
-            setting_bp = 1;
-        }
+        hwbp = get_hw_breakpoint_with_ref(ea);
         rel = kzalloc(sizeof(*rel), GFP_ATOMIC);
         rel->bp = swbp;
         rel->access_type = 0;
         list_add_tail(&rel->lst, &hwbp->sw_breakpoints);
+
         spin_unlock_irqrestore(&hw_lock, hw_flags);
 
-        if (setting_bp)
-        {
-            racehound_set_hwbp(hwbp);
-        }
-
         mdelay(DELAY_MSEC);
-
-        if (setting_bp)
-        {
-            racehound_unset_hwbp(hwbp);
-        }
 
         spin_lock_irqsave(&hw_lock, hw_flags);
         list_del(&rel->lst);
         kfree(rel);
-        put_hw_breakpoint(hwbp);
+        hw_breakpoint_unref(hwbp);
         spin_unlock_irqrestore(&hw_lock, hw_flags);
 
         //<>
@@ -997,8 +940,6 @@ static int __init racehound_module_init(void)
     INIT_LIST_HEAD(&sw_breakpoints_pool);
     INIT_LIST_HEAD(&sw_breakpoints_ranges);
 
-    mutex_init(&pool_mutex);
-    
     INIT_LIST_HEAD(&funcs_with_offsets);
     
     /* ----------------------- */
