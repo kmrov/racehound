@@ -15,7 +15,7 @@ struct hw_breakpoint {
 };
 
 struct hw_sw_relation {
-    struct sw_breakpoint *bp;
+    struct sw_active *bp;
     short access_type;
 
     struct list_head lst;

@@ -1,7 +1,7 @@
 #ifndef SW_BREAKPOINTS_H
 #define SW_BREAKPOINTS_H
 
-struct sw_breakpoint_range 
+struct addr_range 
 {
     char *func_name;
     unsigned int offset;
@@ -9,7 +9,7 @@ struct sw_breakpoint_range
     struct list_head lst;
 };
 
-struct sw_breakpoint_used
+struct sw_used
 {
     char *func_name;
     unsigned int offset;
@@ -18,7 +18,7 @@ struct sw_breakpoint_used
     struct list_head lst;
 };
 
-struct sw_breakpoint 
+struct sw_active 
 {
     void *addr;
     char *func_name;
