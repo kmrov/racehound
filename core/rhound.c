@@ -107,6 +107,7 @@ module_param(bp_offset, int, S_IRUGO);
 // unload.
 static void work_fn_set_soft_bp(struct work_struct *work);
 DECLARE_DELAYED_WORK(bp_work, work_fn_set_soft_bp);
+#define HW_CLEAN_INTERVAL (HZ)
 
 static u8 soft_bp = 0xcc;
 
@@ -117,6 +118,31 @@ static struct mutex *ptext_mutex = NULL;
 static void * (*do_text_poke)(void *addr, const void *opcode, size_t len) = 
     NULL;
 /* ====================================================================== */
+
+static void hw_breakpoint_clean_fn(struct work_struct *work);
+DECLARE_DELAYED_WORK(hw_clean_work, hw_breakpoint_clean_fn);
+
+void hw_breakpoint_clean_fn(struct work_struct *work)
+{
+    unsigned long flags;
+    struct hw_breakpoint *bp;
+    printk("hw_breakpoint_clean work started\n");
+    spin_lock_irqsave(&hw_lock, flags);
+    list_for_each_entry(bp, &hw_list, lst)
+    {
+        if (bp->refcount == 0 && jiffies >= bp->expired_at)
+        {
+            list_del(&bp->lst);
+            racehound_unset_hwbp(bp);
+        }
+    }
+    spin_unlock_irqrestore(&hw_lock, flags);
+    printk("set_soft_bp work finished\n");
+    if (target_module)
+    {
+        queue_delayed_work(wq, &hw_clean_work, HW_CLEAN_INTERVAL);
+    }
+}
 
 int racehound_add_breakpoint(char *func_name, unsigned int offset);
 void racehound_sync_ranges_with_pool(void);
@@ -506,6 +532,21 @@ void work_fn_set_soft_bp(struct work_struct *work)
     }
 }
 
+void detach_from_target(void)
+{
+    if (target_module)
+    {
+        del_timer_sync(&addr_timer);
+        
+        target_module = NULL;
+
+        clean_hw_breakpoints();
+
+        cancel_delayed_work_sync(&bp_work);
+        cancel_delayed_work_sync(&hw_clean_work);
+    }
+}
+
 static int rhound_detector_notifier_call(struct notifier_block *nb,
     unsigned long mod_state, void *vmod)
 {
@@ -554,6 +595,7 @@ static int rhound_detector_notifier_call(struct notifier_block *nb,
                 smp_wmb();
                 addr_timer_fn(0);
                 queue_delayed_work(wq, &bp_work, 0);
+                queue_delayed_work(wq, &hw_clean_work, HW_CLEAN_INTERVAL);
             }
         break;
         
@@ -563,15 +605,7 @@ static int rhound_detector_notifier_call(struct notifier_block *nb,
                 printk("unload\n");
                 smp_wmb();
 
-                del_timer_sync(&addr_timer);
-
-                // No need to unset the sw breakpoint, the 
-                // code where it is set will no longer be 
-                // able to execute.
-                
-                target_module = NULL;
-
-                cancel_delayed_work_sync(&bp_work);
+                detach_from_target();
 
                 printk("hello unload detected\n");
             }
@@ -636,6 +670,9 @@ on_soft_bp_triggered(struct die_args *args)
             list_add_tail(&rel->lst, &hwbp->sw_breakpoints);
 
             spin_unlock_irqrestore(&hw_lock, hw_flags);
+
+            while (!hwbp->work_started)
+                ;
 
             mdelay(DELAY_MSEC);
 
@@ -1007,7 +1044,9 @@ out:
 static void __exit racehound_module_exit(void)
 {
     printk("exit\n");
-    cancel_delayed_work_sync(&bp_work);
+
+    detach_from_target();
+
     flush_workqueue( wq );
 
     destroy_workqueue( wq );

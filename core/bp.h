@@ -3,12 +3,18 @@
 
 #include "sw_breakpoints.h"
 
+#include <linux/jiffies.h>
+
+#define HW_CLEAN_DELAY (5*HZ)
+
 struct hw_breakpoint {
     struct perf_event * __percpu *event;
     struct perf_event_attr *attr;
     void *addr;
     short size;
     short refcount;
+    volatile short work_started;
+    unsigned long expired_at;
     struct list_head sw_breakpoints;
 
     struct list_head lst;
@@ -28,6 +34,7 @@ void racehound_set_breakpoint_addr(void *addr);
 struct hw_breakpoint *get_hw_breakpoint_with_ref(void *ea);
 void hw_breakpoint_ref(struct hw_breakpoint *bp);
 void hw_breakpoint_unref(struct hw_breakpoint *bp);
+void clean_hw_breakpoints(void);
 
 int racehound_set_hwbp(struct hw_breakpoint *);
 void racehound_unset_hwbp(struct hw_breakpoint *);

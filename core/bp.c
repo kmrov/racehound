@@ -8,6 +8,7 @@
 #include <linux/workqueue.h>
 #include <linux/spinlock.h>
 #include <linux/atomic.h>
+#include <linux/jiffies.h>
 
 #include <linux/smp.h>
 #include <linux/sched.h>
@@ -75,9 +76,22 @@ void hw_breakpoint_unref(struct hw_breakpoint *bp)
     bp->refcount--;
     if (bp->refcount == 0)
     {
+        bp->expired_at = jiffies + HW_CLEAN_DELAY;
+    }
+}
+
+void clean_hw_breakpoints(void)
+{
+    struct hw_breakpoint *bp;
+    unsigned long flags;
+    spin_lock_irqsave(&hw_lock, flags);
+    while (!list_empty(&hw_list))
+    {
+        bp = list_first_entry(&hw_list, struct hw_breakpoint, lst);
         list_del(&bp->lst);
         racehound_unset_hwbp(bp);
     }
+    spin_unlock_irqrestore(&hw_lock, flags);
 }
 
 
@@ -130,6 +144,7 @@ void racehound_set_hwbp_work(struct work_struct *work)
     kfree( (void *)work );
     printk(KERN_INFO "set_hwbp_work, CPU=%d, task_struct=%p\n", 
         smp_processor_id(), current);
+    bp->work_started = 1;
     bp->event = register_wide_hw_breakpoint(bp->attr, racehound_hbp_handler, NULL);
     if (IS_ERR((void __force *)bp->event)) 
     {
@@ -180,6 +195,8 @@ int racehound_set_hwbp(struct hw_breakpoint *bp)
     bp->attr->bp_addr = (unsigned long)bp->addr;
     bp->attr->bp_len = HW_BREAKPOINT_LEN_4;
     bp->attr->bp_type = HW_BREAKPOINT_W | HW_BREAKPOINT_R;
+
+    bp->work_started = 0;
 
     queue_work( wq, (struct work_struct *)work_set );
     return 0;
