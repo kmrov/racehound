@@ -12,4 +12,5 @@ configure_file("${CMAKE_CURRENT_SOURCE_DIR}/test.sh.in"
 	"${CMAKE_CURRENT_BINARY_DIR}/test.sh"
 	@ONLY)
 
-rh_test_add_script("race_hound.simple.01" "test.sh")
+rh_test_add_script("race_hound.simple.01" "test.sh" "--offset")
+rh_test_add_script("race_hound.simple.02" "test.sh" "--function")

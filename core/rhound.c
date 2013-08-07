@@ -473,6 +473,10 @@ void *decode_and_get_addr(void *insn_addr, struct pt_regs *regs)
         }
         size = get_operand_size_from_insn_attr(&insn, insn.attr.opnd_type1);
     }
+    else
+    {
+        BUG_ON(1);
+    }
 
     return (void*) ea;
 }
