@@ -106,9 +106,17 @@ void racehound_hbp_handler(struct perf_event *event,
                     "ip: %pS \n", 
                     bp->addr, (void *)regs->ip);
                 atomic_inc(&race_counter);
-                break;
             }
+            else
+            {
+                printk("Interrupt on inactive hardware breakpoint.\n");
+            }
+            break;
         }
+    }
+    if (&bp->lst == &hw_list)
+    {
+        printk("Interrupt on deleted hardware breakpoint.\n");
     }
     
     spin_unlock_irqrestore(&hw_lock, flags);

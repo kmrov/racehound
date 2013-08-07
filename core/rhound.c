@@ -597,9 +597,6 @@ on_soft_bp_triggered(struct die_args *args)
     struct hw_breakpoint *hwbp;
     struct hw_sw_relation *rel;
     unsigned long sw_flags, hw_flags;
-    /* [???] 
-     * How should we protect the access to 'bp_addr'? A spinlock in 
-     * addition to text_mutex? */
 
     spin_lock_irqsave(&sw_lock, sw_flags);
     
