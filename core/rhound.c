@@ -85,7 +85,7 @@ extern spinlock_t hw_lock;
 
 /* ====================================================================== */
 
-#define DELAY_MSEC 200
+#define DELAY_MSEC 50
 
 #define ADDR_TIMER_INTERVAL (HZ * 1) /* randomize breakpoints every 5 sec */
 static struct timer_list addr_timer;
@@ -107,7 +107,6 @@ module_param(bp_offset, int, S_IRUGO);
 // unload.
 static void work_fn_set_soft_bp(struct work_struct *work);
 DECLARE_DELAYED_WORK(bp_work, work_fn_set_soft_bp);
-#define HW_CLEAN_INTERVAL (HZ)
 
 static u8 soft_bp = 0xcc;
 
@@ -121,6 +120,7 @@ static void * (*do_text_poke)(void *addr, const void *opcode, size_t len) =
 
 static void hw_breakpoint_clean_fn(struct work_struct *work);
 DECLARE_DELAYED_WORK(hw_clean_work, hw_breakpoint_clean_fn);
+#define HW_CLEAN_INTERVAL (HZ)
 
 void hw_breakpoint_clean_fn(struct work_struct *work)
 {
@@ -137,7 +137,7 @@ void hw_breakpoint_clean_fn(struct work_struct *work)
         }
     }
     spin_unlock_irqrestore(&hw_lock, flags);
-    printk("set_soft_bp work finished\n");
+    printk("hw_breakpoint_clean work finished\n");
     if (target_module)
     {
         queue_delayed_work(wq, &hw_clean_work, HW_CLEAN_INTERVAL);
@@ -602,12 +602,11 @@ static int rhound_detector_notifier_call(struct notifier_block *nb,
         case MODULE_STATE_GOING:
             if(mod == target_module)
             {
-                printk("unload\n");
                 smp_wmb();
 
                 detach_from_target();
 
-                printk("hello unload detected\n");
+                printk("Target module unloaded, total races found: %d\n", atomic_read(&race_counter));
             }
         break;
     }

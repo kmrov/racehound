@@ -36,7 +36,7 @@ extern atomic_t race_counter;
 struct hw_breakpoint *get_hw_breakpoint_with_ref(void *ea)
 {
     struct hw_breakpoint *bp;
-
+    BUG_ON(!spin_is_locked(&hw_lock));
     list_for_each_entry(bp, &hw_list, lst)
     {
         if (bp->addr == ea)
@@ -67,12 +67,14 @@ struct hw_breakpoint *get_hw_breakpoint_with_ref(void *ea)
 // should be called with hw_lock locked
 void hw_breakpoint_ref(struct hw_breakpoint *bp)
 {
+    BUG_ON(!spin_is_locked(&hw_lock));
     bp->refcount++;
 }
 
 // should be called with hw_lock locked
 void hw_breakpoint_unref(struct hw_breakpoint *bp)
 {
+    BUG_ON(!spin_is_locked(&hw_lock));
     bp->refcount--;
     if (bp->refcount == 0)
     {
@@ -209,7 +211,6 @@ void racehound_unset_hwbp(struct hw_breakpoint *bp)
     printk(KERN_INFO 
            "plan_clear_hwbp: CPU=%d, task_struct=%p\n", 
            smp_processor_id(), current);
-    hw_breakpoint_ref(bp);
     work_unset = (struct hwbp_work *)kmalloc(sizeof(*work_unset), GFP_ATOMIC);
     INIT_WORK((struct work_struct *) work_unset, racehound_unset_hwbp_work);
     work_unset->bp = bp;
