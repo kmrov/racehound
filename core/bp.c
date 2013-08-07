@@ -99,15 +99,18 @@ void racehound_hbp_handler(struct perf_event *event,
     {
         if ( (__u64)(unsigned long) bp->addr == event->attr.bp_addr)
         {
-            printk(KERN_INFO 
-                "[DBG] Race detected between accesses to *%p! "
-                "ip: %pS \n", 
-                bp->addr, (void *)regs->ip);
-            break;
+            if (!list_empty(&bp->sw_breakpoints))
+            {
+                printk(KERN_INFO 
+                    "[DBG] Race detected between accesses to *%p! "
+                    "ip: %pS \n", 
+                    bp->addr, (void *)regs->ip);
+                atomic_inc(&race_counter);
+                break;
+            }
         }
     }
-    atomic_inc(&race_counter);
-
+    
     spin_unlock_irqrestore(&hw_lock, flags);
 }
 

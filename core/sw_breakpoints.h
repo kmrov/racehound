@@ -11,9 +11,11 @@ struct addr_range
 
 struct sw_used
 {
+    void *addr;
     char *func_name;
     unsigned int offset;
     short chosen;
+    u8 orig_byte;
     
     struct list_head lst;
 };
@@ -23,7 +25,6 @@ struct sw_active
     void *addr;
     char *func_name;
     unsigned int offset;
-    int reset_allowed;
     int set;
     u8 orig_byte;
     

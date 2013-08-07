@@ -52,8 +52,6 @@ struct dentry *bp_file = NULL;
 
 struct workqueue_struct *wq;
 
-int racehound_changed = 0;
-
 extern struct list_head tmod_funcs;
 
 #define CHUNK_SIZE 4096
@@ -107,7 +105,8 @@ module_param(bp_offset, int, S_IRUGO);
  * needed. */
 // TODO: prove the timer cannot be armed when this module is about to 
 // unload.
-static struct timer_list bp_timer;
+static void work_fn_set_soft_bp(struct work_struct *work);
+DECLARE_DELAYED_WORK(bp_work, work_fn_set_soft_bp);
 
 static u8 soft_bp = 0xcc;
 
@@ -121,12 +120,11 @@ static void * (*do_text_poke)(void *addr, const void *opcode, size_t len) =
 
 int racehound_add_breakpoint(char *func_name, unsigned int offset);
 void racehound_sync_ranges_with_pool(void);
-static void bp_timer_fn(unsigned long arg);
 
 static void
 addr_work_fn(struct work_struct *work)
 {
-    struct sw_used *bpavail = NULL;
+    struct sw_used *bpused = NULL;
     struct sw_active *bpactive = NULL, *n = NULL;
     int pool_length = 0, count = random_breakpoints_count, i=0, j=0, gen = 1;
     unsigned int random_bp_number;
@@ -150,9 +148,9 @@ addr_work_fn(struct work_struct *work)
         kfree(bpactive);
     }
 
-    list_for_each_entry(bpavail, &used_list, lst) 
+    list_for_each_entry(bpused, &used_list, lst) 
     {
-        bpavail->chosen = 0;
+        bpused->chosen = 0;
         pool_length++;
     }
 
@@ -169,15 +167,15 @@ addr_work_fn(struct work_struct *work)
             get_random_bytes(&random_bp_number, sizeof(random_bp_number));
             random_bp_number = (random_bp_number / INT_MAX) * count;
             j = 0;
-            list_for_each_entry(bpavail, &used_list, lst) 
+            list_for_each_entry(bpused, &used_list, lst) 
             {
                 if (j == random_bp_number)
                 {
-                    if (!bpavail->chosen)
+                    if (!bpused->chosen)
                     {
                         gen = 0;
-                        racehound_add_breakpoint(bpavail->func_name,
-                                                 bpavail->offset);
+                        racehound_add_breakpoint(bpused->func_name,
+                                                 bpused->offset);
                     }
                 }
                 j++;
@@ -189,7 +187,7 @@ addr_work_fn(struct work_struct *work)
     spin_unlock_irqrestore(&sw_lock, flags);
     mutex_unlock(ptext_mutex);
 
-    bp_timer_fn(0);
+    queue_delayed_work(wq, &bp_work, 0);
     kfree(work);
     printk("addr_work_fn finished\n");
 }
@@ -246,20 +244,31 @@ void racehound_remove_breakpoint_range(char *func_name, unsigned int offset)
     spin_unlock_irqrestore(&sw_lock, flags);
 }
 
+void add_used_breakpoint(struct sw_available *func, int index)
+{
+    struct sw_used *bpused = kzalloc(sizeof(*bpused), GFP_ATOMIC);
+    bpused->offset = func->offsets[index];
+    bpused->func_name = kstrdup(func->func_name, GFP_ATOMIC);
+    bpused->addr = (u8*) func->addr + bpused->offset;
+    list_add_tail(&bpused->lst, &used_list);
+}
+
 // Should be called with sw_lock locked
 void racehound_sync_ranges_with_pool(void)
 {
     struct addr_range *bprange = NULL;
-    struct sw_used *bpavail = NULL, *n = NULL;
-    struct sw_available *func = NULL, *found_func = NULL;
+    struct sw_used *bpused = NULL, *n = NULL;
+    struct sw_available *func = NULL;
     int i = 0;
+
+    BUG_ON(!spin_is_locked(&sw_lock));
     
     printk("started sync ranges with pool\n");
 
-    list_for_each_entry_safe(bpavail, n, &used_list, lst)
+    list_for_each_entry_safe(bpused, n, &used_list, lst)
     {
-        list_del(&bpavail->lst);
-        kfree(bpavail);
+        list_del(&bpused->lst);
+        kfree(bpused);
     }
     
     list_for_each_entry(bprange, &ranges_list, lst)
@@ -270,29 +279,35 @@ void racehound_sync_ranges_with_pool(void)
             {
                 if ( (strcmp(func->func_name, bprange->func_name) == 0) )
                 {
-                    found_func = func;
                     break;
                 }
             }
+            if (&func->lst == &available_list)
+            {
+                printk("Warning: function %s not found.\n", bprange->func_name);
+                continue;
+            }
+
             if (bprange->offset)
             {
-                bpavail = kzalloc(sizeof(*bpavail), GFP_ATOMIC);
-                bpavail->offset = bprange->offset;
-                bpavail->func_name = kzalloc(strlen(bprange->func_name)+1, GFP_ATOMIC);
-                strcpy(bpavail->func_name, bprange->func_name);
-                INIT_LIST_HEAD(&bpavail->lst);
-                list_add_tail(&bpavail->lst, &used_list);
+                for (i = 0; i < func->offsets_len; i++)
+                {
+                    if (func->offsets[i] == bprange->offset)
+                    {
+                        add_used_breakpoint(func, i);
+                        break;
+                    }
+                }
+                if (i == func->offsets_len)
+                {
+                    printk("Warning: offset %x in function %s not found.\n", bprange->offset, bprange->func_name);
+                }
             }
             else
             {
-                for (i = 0; i < found_func->offsets_len; i++)
+                for (i = 0; i < func->offsets_len; i++)
                 {
-                    bpavail = kzalloc(sizeof(*bpavail), GFP_ATOMIC);
-                    bpavail->offset = found_func->offsets[i];
-                    bpavail->func_name = kzalloc(strlen(bprange->func_name)+1, GFP_ATOMIC);
-                    strcpy(bpavail->func_name, bprange->func_name);
-                    INIT_LIST_HEAD(&bpavail->lst);
-                    list_add_tail(&bpavail->lst, &used_list);
+                    add_used_breakpoint(func, i);
                 }
             }
         }
@@ -302,40 +317,37 @@ void racehound_sync_ranges_with_pool(void)
             {
                 for (i = 0; i < func->offsets_len; i++)
                 {
-                    bpavail = kzalloc(sizeof(*bpavail), GFP_ATOMIC);
-                    bpavail->offset = found_func->offsets[i];
-                    bpavail->func_name = kzalloc(strlen(bprange->func_name)+1, GFP_ATOMIC);
-                    strcpy(bpavail->func_name, bprange->func_name);
-                    INIT_LIST_HEAD(&bpavail->lst);
-                    list_add_tail(&bpavail->lst, &used_list);
+                    add_used_breakpoint(func, i);
                 }
             }
         }
     }
 
     printk("synced ranges with pool\n");
-    list_for_each_entry_safe(bpavail, n, &used_list, lst)
+    list_for_each_entry_safe(bpused, n, &used_list, lst)
     {
-        printk("breakpoint: %s+0x%x\n", bpavail->func_name, bpavail->offset);
+        printk("breakpoint: %s+0x%x\n", bpused->func_name, bpused->offset);
     }
 }
 
-/* Should be called with text_mutex and sw_lock locked */
+/* Should be called with ptext_mutex and sw_lock locked */
 int racehound_add_breakpoint(char *func_name, unsigned int offset)
 {
     struct sw_available *pos;
     struct sw_active *swbp = kzalloc(sizeof(struct sw_active), GFP_KERNEL);
     int found = 0;
+    BUG_ON(!spin_is_locked(&sw_lock));
+    BUG_ON(!mutex_is_locked(ptext_mutex));
     list_for_each_entry(pos, &available_list, lst) 
     {
         if ( (strcmp(pos->func_name, func_name) == 0) )
         {
             swbp->addr = (u8 *)pos->addr + offset;
-            swbp->reset_allowed = 1;
             swbp->func_name = kzalloc(strlen(func_name)+1, GFP_ATOMIC);
             strcpy(swbp->func_name, func_name);
             swbp->offset = offset;
             swbp->set = 0;
+            swbp->orig_byte = *((u8*)swbp->addr);
             INIT_LIST_HEAD(&swbp->lst);
             list_add_tail(&swbp->lst, &active_list);
             found = 1;
@@ -349,11 +361,12 @@ int racehound_add_breakpoint(char *func_name, unsigned int offset)
     return !found;
 }
 
-/* Should be called with text_mutex locked */
+/* Should be called with ptext_mutex locked */
 void racehound_remove_breakpoint(char *func_name, unsigned int offset)
 {
     unsigned long flags;
     struct sw_active *pos = NULL;
+    BUG_ON(!mutex_is_locked(ptext_mutex));
     spin_lock_irqsave(&sw_lock, flags);
     list_for_each_entry(pos, &active_list, lst) 
     {
@@ -460,15 +473,11 @@ void *decode_and_get_addr(void *insn_addr, struct pt_regs *regs)
         }
         size = get_operand_size_from_insn_attr(&insn, insn.attr.opnd_type1);
     }
-    else
-    {
-        BUG_ON(1);
-    }
+
     return (void*) ea;
 }
 
-static void 
-work_fn_set_soft_bp(struct work_struct *work)
+void work_fn_set_soft_bp(struct work_struct *work)
 {
     unsigned long flags;
     struct sw_active *bp;
@@ -477,39 +486,17 @@ work_fn_set_soft_bp(struct work_struct *work)
     spin_lock_irqsave(&sw_lock, flags);
     list_for_each_entry(bp, &active_list, lst) 
     {
-        if (bp->reset_allowed)
+        if (!bp->set)
         {
-            if ((bp->addr != NULL) && !bp->set) {
-                printk("setting breakpoint to %p (%s+0x%x)\n", bp->addr, bp->func_name, bp->offset);
-                bp->orig_byte = *((u8*)bp->addr);
-                do_text_poke(bp->addr, &soft_bp, 1);
-                bp->set = 1;
-            }
+            printk("setting breakpoint to %p (%s+0x%x)\n", bp->addr, bp->func_name, bp->offset);
+            do_text_poke(bp->addr, &soft_bp, 1);
+            bp->set = 1;
         }
     }
     spin_unlock_irqrestore(&sw_lock, flags);
     mutex_unlock(ptext_mutex);
     printk("set_soft_bp work finished\n");
-    kfree(work);
-}
-
-static void 
-bp_timer_fn(unsigned long arg)
-{
-    struct work_struct *work = NULL;
-    printk("bp_timer started\n");
-
-    work = kzalloc(sizeof(*work), GFP_ATOMIC);
-    if (work != NULL) {
-        INIT_WORK(work, work_fn_set_soft_bp);
-        queue_work(wq, work);
-    }
-    else {
-        pr_info("addr_timer_fn(): out of memory");
-    }
-    
-    mod_timer(&bp_timer, jiffies + BP_TIMER_INTERVAL);
-    printk("bp_timer finished\n");
+    queue_delayed_work(wq, &bp_work, BP_TIMER_INTERVAL);
 }
 
 static int rhound_detector_notifier_call(struct notifier_block *nb,
@@ -517,7 +504,6 @@ static int rhound_detector_notifier_call(struct notifier_block *nb,
 {
     struct kedr_tmod_function *pos;
     struct sw_available *func;
-    struct sw_active *bp;
     int ret = 0/*, i = 0*/;
     struct module* mod = (struct module *)vmod;
     unsigned long flags;
@@ -560,7 +546,7 @@ static int rhound_detector_notifier_call(struct notifier_block *nb,
                 spin_unlock_irqrestore(&sw_lock, flags);
                 smp_wmb();
                 addr_timer_fn(0);
-                bp_timer_fn(0);
+                queue_delayed_work(wq, &bp_work, 0);
             }
         break;
         
@@ -570,22 +556,11 @@ static int rhound_detector_notifier_call(struct notifier_block *nb,
                 printk("unload\n");
                 smp_wmb();
 
-                del_timer_sync(&bp_timer);
                 del_timer_sync(&addr_timer);
 
-                spin_lock_irqsave(&sw_lock, flags);
-
-                list_for_each_entry(bp, &active_list, lst)
-                {
-                    bp->reset_allowed = 0;
-                }
-
-                spin_unlock_irqrestore(&sw_lock, flags);
-                
                 // No need to unset the sw breakpoint, the 
                 // code where it is set will no longer be 
                 // able to execute.
-                //racehound_unset_breakpoint();
                 
                 target_module = NULL;
                 printk("hello unload detected\n");
@@ -644,25 +619,25 @@ on_soft_bp_triggered(struct die_args *args)
 
         // Run the engine...
         ea = decode_and_get_addr((void *)args->regs->ip, args->regs);
+        if (ea)
+        {
+            spin_lock_irqsave(&hw_lock, hw_flags);
+            hwbp = get_hw_breakpoint_with_ref(ea);
+            rel = kzalloc(sizeof(*rel), GFP_ATOMIC);
+            rel->bp = swbp;
+            rel->access_type = 0;
+            list_add_tail(&rel->lst, &hwbp->sw_breakpoints);
 
-        racehound_changed = 0;
+            spin_unlock_irqrestore(&hw_lock, hw_flags);
 
-        spin_lock_irqsave(&hw_lock, hw_flags);
-        hwbp = get_hw_breakpoint_with_ref(ea);
-        rel = kzalloc(sizeof(*rel), GFP_ATOMIC);
-        rel->bp = swbp;
-        rel->access_type = 0;
-        list_add_tail(&rel->lst, &hwbp->sw_breakpoints);
+            mdelay(DELAY_MSEC);
 
-        spin_unlock_irqrestore(&hw_lock, hw_flags);
-
-        mdelay(DELAY_MSEC);
-
-        spin_lock_irqsave(&hw_lock, hw_flags);
-        list_del(&rel->lst);
-        kfree(rel);
-        hw_breakpoint_unref(hwbp);
-        spin_unlock_irqrestore(&hw_lock, hw_flags);
+            spin_lock_irqsave(&hw_lock, hw_flags);
+            list_del(&rel->lst);
+            kfree(rel);
+            hw_breakpoint_unref(hwbp);
+            spin_unlock_irqrestore(&hw_lock, hw_flags);
+        }
 
         //<>
         printk(KERN_INFO 
@@ -926,11 +901,6 @@ static int __init racehound_module_init(void)
 {
     int ret = 0;
     
-    init_timer(&bp_timer);
-    bp_timer.function = bp_timer_fn;
-    bp_timer.data = 0;
-    bp_timer.expires = 0; /* to be set by mod_timer() later */
-
     init_timer(&addr_timer);
     addr_timer.function = addr_timer_fn;
     addr_timer.data = 0;
@@ -1044,7 +1014,6 @@ static void __exit racehound_module_exit(void)
     
     /* Just in case */
     smp_wmb();
-    del_timer_sync(&bp_timer);
     del_timer_sync(&addr_timer);
     printk("deleted timers\n");
     
