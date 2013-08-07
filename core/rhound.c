@@ -496,7 +496,10 @@ void work_fn_set_soft_bp(struct work_struct *work)
     spin_unlock_irqrestore(&sw_lock, flags);
     mutex_unlock(ptext_mutex);
     printk("set_soft_bp work finished\n");
-    queue_delayed_work(wq, &bp_work, BP_TIMER_INTERVAL);
+    if (target_module)
+    {
+        queue_delayed_work(wq, &bp_work, BP_TIMER_INTERVAL);
+    }
 }
 
 static int rhound_detector_notifier_call(struct notifier_block *nb,
@@ -563,6 +566,9 @@ static int rhound_detector_notifier_call(struct notifier_block *nb,
                 // able to execute.
                 
                 target_module = NULL;
+
+                cancel_delayed_work_sync(&bp_work);
+
                 printk("hello unload detected\n");
             }
         break;
@@ -1000,6 +1006,7 @@ out:
 static void __exit racehound_module_exit(void)
 {
     printk("exit\n");
+    cancel_delayed_work_sync(&bp_work);
     flush_workqueue( wq );
 
     destroy_workqueue( wq );
