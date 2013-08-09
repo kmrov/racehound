@@ -635,6 +635,7 @@ void real_handler(void)
         if (addr->pcurrent == current)
         {
             printk("Real handler found by current.\n");
+            break;
         }
     }
     spin_unlock_irqrestore(&sw_lock, flags);
