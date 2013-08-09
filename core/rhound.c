@@ -621,6 +621,26 @@ static struct notifier_block detector_nb = {
     .priority = 3, /*Some number*/
 };
 
+void handler_wrapper(void);
+
+struct list_head return_addrs;
+void real_handler(void)
+{
+    struct return_addr *addr;
+    unsigned long flags;
+    printk("Real handler started, current=%p\n", current);
+    spin_lock_irqsave(&sw_lock, flags);
+    list_for_each_entry(addr, &return_addrs, lst)
+    {
+        if (addr->pcurrent == current)
+        {
+            printk("Real handler found by current.\n");
+        }
+    }
+    spin_unlock_irqrestore(&sw_lock, flags);
+    BUG_ON(&addr->lst == &return_addrs);
+}
+
 static int 
 on_soft_bp_triggered(struct die_args *args)
 {
@@ -629,10 +649,30 @@ on_soft_bp_triggered(struct die_args *args)
     struct sw_active *swbp;
     struct hw_breakpoint *hwbp;
     struct hw_sw_relation *rel;
+    struct return_addr *addr;
     unsigned long sw_flags, hw_flags;
 
     spin_lock_irqsave(&sw_lock, sw_flags);
     
+    if (
+            ( args->regs->ip > (unsigned long) &handler_wrapper ) &&
+            ( args->regs->ip <= (16 + (unsigned long) &handler_wrapper) )
+       )
+    {
+        list_for_each_entry(addr, &return_addrs, lst)
+        {
+            if (addr->pcurrent == current)
+            {
+                break;
+            }
+        }
+        BUG_ON(&addr->lst == &return_addrs);
+        memcpy(args->regs, &addr->regs, sizeof(addr->regs));
+        args->regs->ip -= 1;
+        spin_unlock_irqrestore(&sw_lock, sw_flags);
+        return NOTIFY_STOP;
+    }
+
     list_for_each_entry(swbp, &active_list, lst)
     {
         if ((swbp->addr + 1) == (u8*) args->regs->ip)
@@ -654,6 +694,17 @@ on_soft_bp_triggered(struct die_args *args)
         /* Another ugly thing. We should lock text_mutex but we are in 
         * atomic context... */
         do_text_poke(swbp->addr, &swbp->orig_byte, 1);
+
+        addr = kzalloc(sizeof(*addr), GFP_ATOMIC);
+        addr->return_addr = (void *) args->regs->ip - 1;
+        addr->pcurrent = current;
+        memcpy(&addr->regs, args->regs, sizeof(addr->regs));
+        list_add_tail(&addr->lst, &return_addrs);
+
+        args->regs->ip = (unsigned long) &handler_wrapper;
+
+
+/*
         args->regs->ip -= 1;
         swbp->set = 0;
 
@@ -681,7 +732,7 @@ on_soft_bp_triggered(struct die_args *args)
             hw_breakpoint_unref(hwbp);
             spin_unlock_irqrestore(&hw_lock, hw_flags);
         }
-
+*/
         //<>
         printk(KERN_INFO 
         "[End] Our software bp at %p; CPU=%d, task_struct=%p\n", 
@@ -952,6 +1003,8 @@ static int __init racehound_module_init(void)
     INIT_LIST_HEAD(&active_list);
     INIT_LIST_HEAD(&used_list);
     INIT_LIST_HEAD(&ranges_list);
+
+    INIT_LIST_HEAD(&return_addrs);
 
     INIT_LIST_HEAD(&available_list);
     
