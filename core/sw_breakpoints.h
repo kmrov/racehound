@@ -40,6 +40,7 @@ struct return_addr
     void *return_addr;
     struct task_struct *pcurrent;
     struct pt_regs regs;
+    struct sw_active *swbp;
 };
 
 #endif

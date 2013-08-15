@@ -33,7 +33,7 @@ extern spinlock_t sw_lock;
 extern atomic_t race_counter;
 
 // should be called with hw_lock locked
-struct hw_breakpoint *get_hw_breakpoint_with_ref(void *ea)
+struct hw_breakpoint *get_hw_breakpoint_with_ref(void *ea, short set)
 {
     struct hw_breakpoint *bp;
     BUG_ON(!spin_is_locked(&hw_lock));
@@ -54,7 +54,10 @@ struct hw_breakpoint *get_hw_breakpoint_with_ref(void *ea)
 
         list_add_tail(&bp->lst, &hw_list);
 
-        racehound_set_hwbp(bp);
+        if (set)
+        {
+            racehound_set_hwbp(bp);
+        }
     }
     else
     {
@@ -136,6 +139,36 @@ void racehound_hbp_handler(struct perf_event *event,
     }
     
     spin_unlock_irqrestore(&hw_lock, flags);
+}
+
+void racehound_set_hwbp_plain(struct hw_breakpoint *bp)
+{
+    bp->attr = kzalloc(sizeof(*(bp->attr)), GFP_ATOMIC);
+    hw_breakpoint_init(bp->attr);
+    bp->attr->bp_addr = (unsigned long)bp->addr;
+    bp->attr->bp_len = HW_BREAKPOINT_LEN_4;
+    bp->attr->bp_type = HW_BREAKPOINT_W | HW_BREAKPOINT_R;
+
+    bp->event = register_wide_hw_breakpoint(bp->attr, racehound_hbp_handler, NULL);
+    if (IS_ERR((void __force *)bp->event)) 
+    {
+        printk("register hw breakpoint %lx failed\n", (unsigned long) bp->attr->bp_addr);
+    }
+    else
+    {
+        printk("register hw breakpoint %lx complete\n", (unsigned long) bp->attr->bp_addr);
+    }
+}
+
+void racehound_unset_hwbp_plain(struct hw_breakpoint *bp)
+{
+    if (!IS_ERR((void __force *)bp->event)) 
+    {
+        unregister_wide_hw_breakpoint(bp->event);
+        printk("unregister hw breakpoint %p complete\n", bp->addr);
+    }
+    kfree(bp->attr);
+    kfree(bp);
 }
 
 void racehound_set_hwbp_work(struct work_struct *work)

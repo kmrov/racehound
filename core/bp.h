@@ -31,7 +31,11 @@ void racehound_set_breakpoint(char *symbol_name, int offset);
 void racehound_unset_breakpoint(void);
 void racehound_unregister_breakpoint(void);
 void racehound_set_breakpoint_addr(void *addr);
-struct hw_breakpoint *get_hw_breakpoint_with_ref(void *ea);
+
+void racehound_set_hwbp_plain(struct hw_breakpoint *bp);
+void racehound_unset_hwbp_plain(struct hw_breakpoint *bp);
+
+struct hw_breakpoint *get_hw_breakpoint_with_ref(void *ea, short set);
 void hw_breakpoint_ref(struct hw_breakpoint *bp);
 void hw_breakpoint_unref(struct hw_breakpoint *bp);
 void clean_hw_breakpoints(void);
