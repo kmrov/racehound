@@ -33,7 +33,7 @@ extern spinlock_t sw_lock;
 extern atomic_t race_counter;
 
 // should be called with hw_lock locked
-struct hw_breakpoint *get_hw_breakpoint_with_ref(void *ea, short set)
+struct hw_breakpoint *get_hw_breakpoint_with_ref(void *ea)
 {
     struct hw_breakpoint *bp;
     BUG_ON(!spin_is_locked(&hw_lock));
@@ -54,10 +54,7 @@ struct hw_breakpoint *get_hw_breakpoint_with_ref(void *ea, short set)
 
         list_add_tail(&bp->lst, &hw_list);
 
-        if (set)
-        {
-            racehound_set_hwbp(bp);
-        }
+        racehound_set_hwbp_plain(bp);
     }
     else
     {

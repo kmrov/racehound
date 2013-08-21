@@ -647,14 +647,12 @@ void real_handler(void)
     if (ea)
     {
         spin_lock_irqsave(&hw_lock, hw_flags);
-        hwbp = get_hw_breakpoint_with_ref(ea, 0);
+        hwbp = get_hw_breakpoint_with_ref(ea);
         rel = kzalloc(sizeof(*rel), GFP_ATOMIC);
         rel->bp = addr->swbp;
         rel->access_type = 0;
         list_add_tail(&rel->lst, &hwbp->sw_breakpoints);
         spin_unlock_irqrestore(&hw_lock, hw_flags);
-
-        racehound_set_hwbp_plain(hwbp);
 
         msleep(DELAY_MSEC);
 
@@ -729,35 +727,6 @@ on_soft_bp_triggered(struct die_args *args)
         args->regs->ip = (unsigned long) &handler_wrapper;
         swbp->set = 0;
 
-/*
-        args->regs->ip -= 1;
-        
-
-        // Run the engine...
-        ea = decode_and_get_addr((void *)args->regs->ip, args->regs);
-        if (ea)
-        {
-            spin_lock_irqsave(&hw_lock, hw_flags);
-            hwbp = get_hw_breakpoint_with_ref(ea, 1);
-            rel = kzalloc(sizeof(*rel), GFP_ATOMIC);
-            rel->bp = swbp;
-            rel->access_type = 0;
-            list_add_tail(&rel->lst, &hwbp->sw_breakpoints);
-
-            spin_unlock_irqrestore(&hw_lock, hw_flags);
-
-            while (!hwbp->work_started)
-                ;
-
-            mdelay(DELAY_MSEC);
-
-            spin_lock_irqsave(&hw_lock, hw_flags);
-            list_del(&rel->lst);
-            kfree(rel);
-            hw_breakpoint_unref(hwbp);
-            spin_unlock_irqrestore(&hw_lock, hw_flags);
-        }
-*/
         //<>
         printk(KERN_INFO 
         "[End] Our software bp at %p; CPU=%d, task_struct=%p\n", 
