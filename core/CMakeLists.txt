@@ -21,6 +21,7 @@ kbuild_add_module(${kmodule_name}
 	"bp.c"
 	"sections.c"
 	"decoder.c"
+    "wrapper.S"
 
 # Only for dependencies	
 	"functions.h"

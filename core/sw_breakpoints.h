@@ -1,3 +1,5 @@
+#include <linux/sched.h>
+
 #ifndef SW_BREAKPOINTS_H
 #define SW_BREAKPOINTS_H
 
@@ -29,6 +31,16 @@ struct sw_active
     u8 orig_byte;
     
     struct list_head lst;
+};
+
+struct return_addr
+{
+    struct list_head lst;
+    
+    void *return_addr;
+    struct task_struct *pcurrent;
+    struct pt_regs regs;
+    struct sw_active *swbp;
 };
 
 #endif
