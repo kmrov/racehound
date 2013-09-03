@@ -1,5 +1,3 @@
-# TODO: core module is builded here
-
 set(kmodule_name "race_hound")
 
 # In the future, it should be configurable somehow
@@ -18,14 +16,14 @@ kbuild_include_directories(
 kbuild_add_module(${kmodule_name}
 	"rhound.c"
 	"functions.c"
-	"bp.c"
+#	"bp.c"
 	"sections.c"
 	"decoder.c"
     "wrapper.S"
 
 # Only for dependencies	
 	"functions.h"
-	"bp.h"
+#	"bp.h"
 	"sections.h"
 	"decoder.h"
 # Arch-dependent sources and header
