@@ -250,6 +250,8 @@ static void hw_bp_handler(struct perf_event *event,
         (void *)(unsigned long)event->attr.bp_addr, (void *)regs->ip, 
         cpu, tsk, tsk->comm);
     
+    atomic_inc(&race_counter);
+    
     // TODO: if some other data are needed, you may pass them here via
     // breakinfo[i].swbp
    
