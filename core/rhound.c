@@ -302,9 +302,9 @@ hw_bp_set_impl(struct hw_bp *bp)
     info->type = bp->type;
     
     //<>
-    pr_info("[DBG] "
+    /* pr_info("[DBG] "
        "Installing HW BP on CPU %d for address %p and length code %d.\n", 
-        cpu, (void *)bp->addr, bp->len);
+        cpu, (void *)bp->addr, bp->len); */
     //<>
     
     ret = do_arch_install_hw_bp(pevent[0]);
@@ -501,7 +501,7 @@ hw_bp_clear_impl(struct hw_bp *bp)
     --bp->usage_count;
     
     //<>
-    pr_info("[DBG] Uninstalled HW BP on CPU %d.\n", cpu);
+    //pr_info("[DBG] Uninstalled HW BP on CPU %d.\n", cpu);
     //<>
     return;
 }
