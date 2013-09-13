@@ -1289,9 +1289,9 @@ rhound_detector_notifier_call(struct notifier_block *nb,
             int ret = 0;
             target_module = mod;
             pr_info("[rh] "
-                "Target loaded: %s, module_core=%x, core_size=%d\n", 
+                "Target loaded: %s, module_core=%lx, core_size=%d\n", 
                 module_name(mod),
-                (unsigned int) mod->module_core, mod->core_size);
+                (unsigned long)mod->module_core, mod->core_size);
             
             kedr_print_section_info(target_name);
             ret = kedr_load_function_list(mod);
