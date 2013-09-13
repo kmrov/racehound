@@ -143,18 +143,8 @@ is_tracked_memory_op(struct insn *insn)
     if (insn_is_noop(insn))
         return 0;
     
-    /* Locked updates should always be tracked, because they are 
-     * memory barriers among other things.
-     * "lock add $0, (%esp)" is used, for example, when "mfence" is not
-     * available. Note that this locked instruction addresses the stack
-     * so we must not filter out locked updates even if they refer to
-     * the stack. 
-     * 
-     * [NB] I/O instructions accessing memory should always be tracked 
-     * too but this is fulfilled automatically because these are string 
-     * operations. */
-    if (insn_is_locked_op(insn))
-        return 1;
+    /* [NB] We do not need to handle locked updates in any special way in 
+	 * Racehound. */
     
     if (is_insn_type_e(insn) || is_insn_movbe(insn) || 
         is_insn_cmpxchg8b_16b(insn)) {
