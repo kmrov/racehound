@@ -221,14 +221,9 @@ static void hw_bp_handler(struct perf_event *event,
     
     spin_lock_irqsave(&hw_bp_lock, flags);
     if (event->attr.disabled) {
-        pr_info("[DBG] The breakpoint is disabled, skipping.\n");
+        /*pr_info("[DBG] The breakpoint is disabled, skipping.\n");*/
         goto out;
     }
-    
-    /*pr_info("[DBG] Called hw_bp_handler: "
-        "access from %pS detected, CPU=%d, task_struct=%p, comm: %s\n",
-        (void *)regs->ip, cpu, tsk, tsk->comm);*/
-    //pr_info("[DBG] Address: %llx\n", event->attr.bp_addr);
     
     for (i = 0; i < HBP_NUM; ++i) {
         struct perf_event **pevent = per_cpu_ptr(breakinfo[i].pev, cpu);
@@ -241,7 +236,10 @@ static void hw_bp_handler(struct perf_event *event,
     }
     
      if (breakinfo[i].swbp == NULL) {
-        pr_info("[DBG] Got a HW BP without the corresponding SW BP.\n");
+		/* May happen if a CPU schedules a timer to clear the HW BP on 
+		 * another CPU and the HW BP triggers on the latter before the timer
+		 * function (.swbp is set to NULL before scheduling the timer). */
+        //pr_info("[DBG] Got a HW BP without the corresponding SW BP.\n");
         goto out;
     }
     
@@ -272,14 +270,15 @@ hw_bp_set_impl(struct hw_bp *bp)
    
     pevent = per_cpu_ptr(bp->pev, cpu);
     if (pevent[0]->attr.disabled) {
-        pr_info("[DBG] set: the HW BP is disabled, leaving it as is.\n");
+        /*pr_info("[DBG] set: the HW BP is disabled, leaving it as is.\n");
+		 */
         return 0;
     }
     
     if (time_after(jiffies, bp->max_time)) {
-        pr_info("[DBG] "
+        /*pr_info("[DBG] "
             "The time period when the BP could be set has expired "
-            "(cpu: %d).\n", cpu);
+            "(cpu: %d).\n", cpu);*/
         pevent[0]->attr.disabled = 1;
         --bp->usage_count;
         /* This is not an error.
@@ -823,7 +822,7 @@ void racehound_sync_ranges_with_pool(void)
 
     BUG_ON(!spin_is_locked(&sw_lock));
     
-    printk("started sync ranges with pool\n");
+    /*printk("started sync ranges with pool\n");*/
 
     list_for_each_entry_safe(bpused, n, &used_list, lst)
     {
@@ -886,12 +885,12 @@ void racehound_sync_ranges_with_pool(void)
         }
     }
 
-    pr_info("[DBG] synced ranges with pool\n");
+    /*pr_info("[DBG] synced ranges with pool\n");
     list_for_each_entry_safe(bpused, n, &used_list, lst)
     {
         pr_info("[DBG] breakpoint: %s+0x%x\n", bpused->func_name, 
                 bpused->offset);
-    }
+    }*/
 }
 
 /* Should be called with ptext_mutex and sw_lock locked */
@@ -1235,22 +1234,23 @@ void work_fn_set_soft_bp(struct work_struct *work)
 {
     unsigned long flags;
     struct sw_active *bp;
-    pr_info("[DBG] set_soft_bp work started\n");
+    /*pr_info("[DBG] set_soft_bp work started\n");*/
+	
     mutex_lock(ptext_mutex);
     spin_lock_irqsave(&sw_lock, flags);
     list_for_each_entry(bp, &active_list, lst) 
     {
         if (!bp->set)
         {
-            pr_info("[DBG] setting breakpoint to %p (%s+0x%x)\n", 
-                    bp->addr, bp->func_name, bp->offset);
+            /*pr_info("[DBG] setting breakpoint to %p (%s+0x%x)\n", 
+                    bp->addr, bp->func_name, bp->offset);*/
             do_text_poke(bp->addr, &soft_bp, 1);
             bp->set = 1;
         }
     }
     spin_unlock_irqrestore(&sw_lock, flags);
     mutex_unlock(ptext_mutex);
-    pr_info("[DBG] set_soft_bp work finished\n");
+    /*pr_info("[DBG] set_soft_bp work finished\n");*/
     if (target_module)
     {
         schedule_delayed_work(&bp_work, BP_TIMER_INTERVAL);
@@ -1370,13 +1370,13 @@ rhound_real_handler(void)
 	int size = 0;
     int ret = 0;
     
-    printk("Real handler started, current=%p\n", current);
+    /*printk("Real handler started, current=%p\n", current);*/
     spin_lock_irqsave(&sw_lock, sw_flags);
     list_for_each_entry(addr, &return_addrs, lst)
     {
         if (addr->pcurrent == current)
         {
-            printk("Real handler found by current.\n");
+            /*printk("Real handler found by current.\n");*/
             break;
         }
     }
@@ -1404,7 +1404,7 @@ rhound_real_handler(void)
         hw_bp_clear(ret);
     }
     else {
-        pr_warning("[DBG] Failed to set a hardware breakpoint at %p.\n", 
+        pr_warning("[rh] Failed to set a hardware breakpoint at %p.\n", 
                    ea);
     }
 }
@@ -1456,9 +1456,9 @@ on_soft_bp_triggered(struct die_args *args)
         ret = NOTIFY_STOP; /* our breakpoint, we will handle it */
 
         //<>
-        printk(KERN_INFO 
+        /*pr_info( 
             "[Begin] Our software bp at %p; CPU=%d, task_struct=%p\n", 
-            swbp->addr, smp_processor_id(), current);
+            swbp->addr, smp_processor_id(), current);*/
         //<>
 
         /* Another ugly thing. We should lock text_mutex but we cannot do
@@ -1476,9 +1476,9 @@ on_soft_bp_triggered(struct die_args *args)
         swbp->set = 0;
 
         //<>
-        pr_info( 
+        /*pr_info( 
             "[End] Our software bp at %p; CPU=%d, task_struct=%p\n", 
-            swbp->addr, smp_processor_id(), current);
+            swbp->addr, smp_processor_id(), current);*/
         //<>
     }
 
@@ -1495,26 +1495,6 @@ my_exception_notify(struct notifier_block *unused, unsigned long val,
     
     if (val == DIE_INT3) {
         return on_soft_bp_triggered(args);
-    }
-    else if (val == DIE_DEBUG) {
-        unsigned long dr0, dr6, dr7;
-            
-        get_debugreg(dr0, 0);
-        get_debugreg(dr7, 7);
-        dr6 = *(unsigned long *)ERR_PTR(args->err);
-        
-        printk(KERN_INFO 
-            "DIE_DEBUG, CPU=%d, task_struct=%p, ip: %pS, flags: 0x%lx, "
-            "dr0: 0x%lx, dr6: 0x%lx, dr7: 0x%lx, "
-            "single-stepping: %s\n", 
-            smp_processor_id(), current,
-            (void *)args->regs->ip, args->regs->flags,
-            dr0, dr6, dr7,
-            (dr6 & DR_STEP ? "yes" : "no"));
-    }
-    else {
-        printk(KERN_INFO "DIE code: %lu, CPU=%d, task_struct=%p\n", 
-            val, smp_processor_id(), current);
     }
     
     return NOTIFY_DONE; /* let the next handler try */
@@ -1699,7 +1679,7 @@ static ssize_t bp_file_write(struct file *filp, const char __user *buf,
             {
                 sscanf(offset, "%x", &offset_val);
             }
-            printk("func_name: %s offset_val: %x\n", func_name, offset_val);
+            /*printk("func_name: %s offset_val: %x\n", func_name, offset_val);*/
             if (remove)
             {
                 racehound_remove_breakpoint_range(func_name, offset_val);
@@ -1709,7 +1689,7 @@ static ssize_t bp_file_write(struct file *filp, const char __user *buf,
                 racehound_add_breakpoint_range(func_name, offset_val);
             }
             found = 1;
-            printk("add/remove complete\n");
+            /*printk("add/remove complete\n");*/
         }
     }
     
@@ -1746,8 +1726,8 @@ find_kernel_api(void)
         return -EINVAL;
     }
     
-    pr_info("[DBG] &text_mutex = %p, &text_poke = %p\n",
-        ptext_mutex, do_text_poke);
+    /*pr_info("[DBG] &text_mutex = %p, &text_poke = %p\n",
+        ptext_mutex, do_text_poke);*/
     
     do_arch_install_hw_bp = (void *)kallsyms_lookup_name(
         "arch_install_hw_breakpoint");
@@ -1763,11 +1743,11 @@ find_kernel_api(void)
         return -EINVAL;
     }
     
-    pr_info("[DBG] &arch_install_hw_breakpoint: %p\n", 
-        do_arch_install_hw_bp);
+    /*pr_info("[DBG] &arch_install_hw_breakpoint: %p\n", 
+        do_arch_install_hw_bp);*/
     
-    pr_info("[DBG] &arch_uninstall_hw_breakpoint: %p\n", 
-        do_arch_uninstall_hw_bp);
+    /*pr_info("[DBG] &arch_uninstall_hw_breakpoint: %p\n", 
+        do_arch_uninstall_hw_bp);*/
     
     return 0;
 }
@@ -1806,13 +1786,13 @@ racehound_module_init(void)
 
     debugfs_dir_dentry = debugfs_create_dir(debugfs_dir_name, NULL);
     if (IS_ERR(debugfs_dir_dentry)) {
-        pr_err("debugfs is not supported\n");
+        pr_err("[rh] debugfs is not supported\n");
         ret = -ENODEV;
         goto out;
     }
 
     if (debugfs_dir_dentry == NULL) {
-        pr_err("failed to create a directory in debugfs\n");
+        pr_err("[rh] failed to create a directory in debugfs\n");
         ret = -EINVAL;
         goto out;
     }
@@ -1821,7 +1801,7 @@ racehound_module_init(void)
                                   NULL, &bp_file_ops);
     if (bp_file == NULL)
     {
-        pr_err("Failed to create breakpoint control file in debugfs.");
+        pr_err("[rh] Failed to create breakpoint control file in debugfs.");
         goto out_rmdir;
     }
     
@@ -1829,7 +1809,7 @@ racehound_module_init(void)
         debugfs_dir_dentry, NULL, &race_counter_file_ops);
     if(race_counter_file == NULL)
     {
-        pr_err("Failed to create race counter file in debugfs.");
+        pr_err("[rh] Failed to create race counter file in debugfs.");
         goto out_rmdir;
     }
 
@@ -1839,7 +1819,8 @@ racehound_module_init(void)
     
     ret = kedr_init_function_subsystem();
     if (ret != 0) {
-        printk("Error occured in kedr_init_function_subsystem(). Code: %d\n",
+        pr_err("[rh] "
+			"Error occured in kedr_init_function_subsystem(). Code: %d\n",
             ret);
         goto out_rmsection;
     }
