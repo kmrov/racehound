@@ -102,6 +102,10 @@ struct sw_active
     unsigned int offset;
     int set;
     u8 orig_byte;
+
+    /* The CPU and the task where this BP has been triggered. */
+    int cpu;
+    struct task_struct *task;
     
     struct list_head lst;
 };
@@ -214,6 +218,10 @@ static unsigned long placeholder_addr = (unsigned long)addr_work_fn;
 static void hw_bp_handler(struct perf_event *event,
     struct perf_sample_data *data, struct pt_regs *regs)
 {
+    struct task_struct *first_task = NULL;
+    int first_cpu;
+    const char *first_comm = NULL;
+
     struct task_struct *tsk = current;
     int cpu = raw_smp_processor_id();
     unsigned long flags;
@@ -236,23 +244,31 @@ static void hw_bp_handler(struct perf_event *event,
     }
     
      if (breakinfo[i].swbp == NULL) {
-		/* May happen if a CPU schedules a timer to clear the HW BP on 
-		 * another CPU and the HW BP triggers on the latter before the timer
-		 * function (.swbp is set to NULL before scheduling the timer). */
+        /* May happen if a CPU schedules a timer to clear the HW BP on 
+         * another CPU and the HW BP triggers on the latter before the timer
+         * function (.swbp is set to NULL before scheduling the timer). */
         //pr_info("[DBG] Got a HW BP without the corresponding SW BP.\n");
         goto out;
     }
     
-    pr_info("[rh] Race detected between accesses to *%p: that data "
-        "were accessed from %pS, CPU=%d, task_struct=%p, comm: %s\n",
-        (void *)(unsigned long)event->attr.bp_addr, (void *)regs->ip, 
-        cpu, tsk, tsk->comm);
-    
-    atomic_inc(&race_counter);
+    first_cpu = breakinfo[i].swbp->cpu;
+    first_task = breakinfo[i].swbp->task;
+    first_comm = (first_task == NULL ? "<unknown>" : first_task->comm);
+
+    pr_info("[rh] Detected a data race on the memory at %p between "
+        "the instruction at %p (%pS, CPU=%d, task_struct=%p, comm: \"%s\") "
+        "and the instruction right before "
+        "%p (%pS, CPU=%d, task_struct=%p, comm: \"%s\")\n",
+        (void *)(unsigned long)event->attr.bp_addr,
+        breakinfo[i].swbp->addr, breakinfo[i].swbp->addr, 
+        first_cpu, first_task, first_comm,
+        (void *)regs->ip, (void *)regs->ip, cpu, tsk, tsk->comm);
     
     // TODO: if some other data are needed, you may pass them here via
     // breakinfo[i].swbp
    
+    atomic_inc(&race_counter);
+
 out:
     spin_unlock_irqrestore(&hw_bp_lock, flags);
 }
@@ -271,7 +287,7 @@ hw_bp_set_impl(struct hw_bp *bp)
     pevent = per_cpu_ptr(bp->pev, cpu);
     if (pevent[0]->attr.disabled) {
         /*pr_info("[DBG] set: the HW BP is disabled, leaving it as is.\n");
-		 */
+         */
         return 0;
     }
     
@@ -939,6 +955,8 @@ void racehound_remove_breakpoint(char *func_name, unsigned int offset)
             {
                 do_text_poke(pos->addr, &(pos->orig_byte), 1);
                 pos->set = 0;
+                pos->cpu = -1;
+                pos->task = NULL;
             }
             list_del(&pos->lst);
             kfree(pos->func_name);
@@ -995,25 +1013,25 @@ static int process_insn(struct insn* insn, void* params)
 static unsigned int
 get_mem_size_type_e_m(struct insn *insn)
 {
-	insn_attr_t *attr = &insn->attr;
-	
-	BUG_ON(insn->length == 0);
-	
-	if (attr->addr_method1 == INAT_AMETHOD_E || 
-	    attr->addr_method1 == INAT_AMETHOD_M) {
-	    	return get_operand_size_from_insn_attr(insn, 
-			attr->opnd_type1);
-	}
-	else if (attr->addr_method2 == INAT_AMETHOD_E || 
-	    attr->addr_method2 == INAT_AMETHOD_M) {
-	    	return get_operand_size_from_insn_attr(insn, 
-			attr->opnd_type2);
-	}
+    insn_attr_t *attr = &insn->attr;
+    
+    BUG_ON(insn->length == 0);
+    
+    if (attr->addr_method1 == INAT_AMETHOD_E || 
+        attr->addr_method1 == INAT_AMETHOD_M) {
+            return get_operand_size_from_insn_attr(insn, 
+            attr->opnd_type1);
+    }
+    else if (attr->addr_method2 == INAT_AMETHOD_E || 
+        attr->addr_method2 == INAT_AMETHOD_M) {
+            return get_operand_size_from_insn_attr(insn, 
+            attr->opnd_type2);
+    }
 
-	/* The function must be called only for the instructions of
-	 * type E or M. */
-	BUG();
-	return 0;
+    /* The function must be called only for the instructions of
+     * type E or M. */
+    BUG();
+    return 0;
 }
 
 /* Determine the length of the memory area accessed by the given instruction
@@ -1022,23 +1040,23 @@ get_mem_size_type_e_m(struct insn *insn)
 static unsigned int
 get_mem_size_type_o(struct insn *insn)
 {
-	insn_attr_t *attr = &insn->attr;
-	
-	BUG_ON(insn->length == 0);
-	
-	if (attr->addr_method1 == INAT_AMETHOD_O) {
-	    	return get_operand_size_from_insn_attr(insn, 
-			attr->opnd_type1);
-	}
-	else if (attr->addr_method2 == INAT_AMETHOD_O) {
-	    	return get_operand_size_from_insn_attr(insn, 
-			attr->opnd_type2);
-	}
+    insn_attr_t *attr = &insn->attr;
+    
+    BUG_ON(insn->length == 0);
+    
+    if (attr->addr_method1 == INAT_AMETHOD_O) {
+            return get_operand_size_from_insn_attr(insn, 
+            attr->opnd_type1);
+    }
+    else if (attr->addr_method2 == INAT_AMETHOD_O) {
+            return get_operand_size_from_insn_attr(insn, 
+            attr->opnd_type2);
+    }
 
-	/* The function must be called only for the instructions of
-	 * type O. */
-	BUG();
-	return 0;
+    /* The function must be called only for the instructions of
+     * type O. */
+    BUG();
+    return 0;
 }
 
 /* Determine the length of the memory area accessed by the given instruction
@@ -1050,25 +1068,25 @@ get_mem_size_type_o(struct insn *insn)
 static unsigned int
 get_mem_size_type_x_y(struct insn *insn)
 {
-	insn_attr_t *attr = &insn->attr;
-	
-	BUG_ON(insn->length == 0);
-	
-	if (attr->addr_method1 == INAT_AMETHOD_X || 
-	    attr->addr_method1 == INAT_AMETHOD_Y) {
-	    	return get_operand_size_from_insn_attr(insn, 
-			attr->opnd_type1);
-	}
-	else if (attr->addr_method2 == INAT_AMETHOD_X || 
-	    attr->addr_method2 == INAT_AMETHOD_Y) {
-	    	return get_operand_size_from_insn_attr(insn, 
-			attr->opnd_type2);
-	}
+    insn_attr_t *attr = &insn->attr;
+    
+    BUG_ON(insn->length == 0);
+    
+    if (attr->addr_method1 == INAT_AMETHOD_X || 
+        attr->addr_method1 == INAT_AMETHOD_Y) {
+            return get_operand_size_from_insn_attr(insn, 
+            attr->opnd_type1);
+    }
+    else if (attr->addr_method2 == INAT_AMETHOD_X || 
+        attr->addr_method2 == INAT_AMETHOD_Y) {
+            return get_operand_size_from_insn_attr(insn, 
+            attr->opnd_type2);
+    }
 
-	/* The function must be called only for the instructions of
-	 * type X or Y. */
-	BUG();
-	return 0;
+    /* The function must be called only for the instructions of
+     * type X or Y. */
+    BUG();
+    return 0;
 }
 
 /* Get the address and size of the memory area accessed by the given insn.
@@ -1077,102 +1095,102 @@ get_mem_size_type_x_y(struct insn *insn)
  * It must be decoded before calling this function. */
 static void *
 get_addr_size_common(struct insn *insn, struct pt_regs *regs, 
-					 int *size /* Out */)
+                     int *size /* Out */)
 {
-	long disp = 0;
-	int mod, rm;
-	int ss, index, base;
-	int rex_r, rex_x, rex_b;
-	long addr;
-	
-	if (size != NULL)
-		*size = get_mem_size_type_e_m(insn);
-	
-	if (insn->displacement.nbytes == 1) /* disp8 */
-		disp = (long)(s8)insn->displacement.value;
-	else if (insn->displacement.nbytes == 4) /* disp32 */
-		disp = (long)(s32)insn->displacement.value;
-	
+    long disp = 0;
+    int mod, rm;
+    int ss, index, base;
+    int rex_r, rex_x, rex_b;
+    long addr;
+    
+    if (size != NULL)
+        *size = get_mem_size_type_e_m(insn);
+    
+    if (insn->displacement.nbytes == 1) /* disp8 */
+        disp = (long)(s8)insn->displacement.value;
+    else if (insn->displacement.nbytes == 4) /* disp32 */
+        disp = (long)(s32)insn->displacement.value;
+    
 #ifdef CONFIG_X86_64
-	if (insn_rip_relative(insn)) {
-		return X86_ADDR_FROM_OFFSET(insn->kaddr, insn->length, disp);
-	}
+    if (insn_rip_relative(insn)) {
+        return X86_ADDR_FROM_OFFSET(insn->kaddr, insn->length, disp);
+    }
 #endif
-	
-	mod = X86_MODRM_MOD(insn->modrm.value);
-	rm = X86_MODRM_RM(insn->modrm.value);
-	
-	base = X86_SIB_BASE(insn->sib.value);
-	index = X86_SIB_INDEX(insn->sib.value);
-	ss = X86_SIB_SCALE(insn->sib.value);
-	
-	rex_r = X86_REX_R(insn->rex_prefix.value);
-	rex_x = X86_REX_X(insn->rex_prefix.value);
-	rex_b = X86_REX_B(insn->rex_prefix.value);
-	
-	if (mod == 0 && rm == 5) {
-		/* Special case: no base, disp32 only. */
-		return (void *)disp;
-	}
-	
-	if (rm != 4) {
-		/* Common case 1: no SIB byte. */
-		if (rex_b)
-			rm += 8;
-		return (void *)(get_reg_val_by_code(rm, regs) + disp);
-	}
-	
-	/* rm == 4 here => SIB byte is present. */
-	addr = disp;
-		
-	if (mod != 0 || base != 5) { 
-		/* Common case 2: base is used. */
-		if (rex_b)
-			base += 8;
-		addr += get_reg_val_by_code(base, regs);
-	}
-	
-	/* [NB] REX.X must be applied before checking if the index register is 
-	 * used. */
-	if (rex_x)
-		index += 8;
-	
-	if (index != 4) { /* index is used */
-		addr += (get_reg_val_by_code(index, regs) << ss);
-	}
-	
-	return (void *)addr;
+    
+    mod = X86_MODRM_MOD(insn->modrm.value);
+    rm = X86_MODRM_RM(insn->modrm.value);
+    
+    base = X86_SIB_BASE(insn->sib.value);
+    index = X86_SIB_INDEX(insn->sib.value);
+    ss = X86_SIB_SCALE(insn->sib.value);
+    
+    rex_r = X86_REX_R(insn->rex_prefix.value);
+    rex_x = X86_REX_X(insn->rex_prefix.value);
+    rex_b = X86_REX_B(insn->rex_prefix.value);
+    
+    if (mod == 0 && rm == 5) {
+        /* Special case: no base, disp32 only. */
+        return (void *)disp;
+    }
+    
+    if (rm != 4) {
+        /* Common case 1: no SIB byte. */
+        if (rex_b)
+            rm += 8;
+        return (void *)(get_reg_val_by_code(rm, regs) + disp);
+    }
+    
+    /* rm == 4 here => SIB byte is present. */
+    addr = disp;
+        
+    if (mod != 0 || base != 5) { 
+        /* Common case 2: base is used. */
+        if (rex_b)
+            base += 8;
+        addr += get_reg_val_by_code(base, regs);
+    }
+    
+    /* [NB] REX.X must be applied before checking if the index register is 
+     * used. */
+    if (rex_x)
+        index += 8;
+    
+    if (index != 4) { /* index is used */
+        addr += (get_reg_val_by_code(index, regs) << ss);
+    }
+    
+    return (void *)addr;
 }
 
 /* Same as get_addr_size_common() but for string operations (type X and Y):
  * LODS, STOS, INS, OUTS, SCAS, CMPS, MOVS. */
 static void *
 get_addr_size_x_y(struct insn *insn, struct pt_regs *regs, 
-					 int *size /* Out */)
+                     int *size /* Out */)
 {
-	/* Currently the size of a single item is reported, i.e., as if
-	 * no REP* prefixes were present. Besides that, address of only one of
-	 * the two memory areas accessed by MOVS and CMPS is reported.
-	 * 
-	 * TODO: 
-	 * - REP prefixes, directon flag and CX should also be taken into 
-	 *   account here;
-	 * - for MOVS and CMPS return addresses of both accessed memory areas,
-	 *   it might be reasonable to set HW BPs for both. */
-	if (size != NULL)
-		*size = get_mem_size_type_x_y(insn);
-	
-	/* Independent on REP* prefixes, DF and CX, the data item pointed to by 
-	 * esi/rsi for type X and edi/rdi for type Y will always be accessed by
-	 * the instruction. Let us track operations with that item at least. */
-	if (is_insn_type_x(insn))
-		return (void *)regs->si;
-	
-	if (is_insn_type_y(insn))
-		return (void *)regs->di;
-	
-	BUG();
-	return NULL;
+    /* Currently the size of a single item is reported, i.e., as if
+     * no REP* prefixes were present. Besides that, address of only one of
+     * the two memory areas accessed by MOVS and CMPS is reported.
+     * 
+     * TODO: 
+     * - REP prefixes, directon flag and CX should also be taken into 
+     *   account here;
+     * - for MOVS and CMPS return addresses of both accessed memory areas,
+     *   it might be reasonable to set HW BPs for both. */
+    if (size != NULL)
+        *size = get_mem_size_type_x_y(insn);
+    
+    /* Independent on REP* prefixes, DF and CX, the data item pointed to by 
+     * esi/rsi for type X and edi/rdi for type Y will always be accessed by
+     * the instruction. Let us track operations with that item at least. */
+    if (is_insn_type_x(insn))
+        return (void *)regs->si;
+    
+    if (is_insn_type_y(insn))
+        return (void *)regs->di;
+    
+    BUG();
+    return NULL;
 }
 /* ====================================================================== */
 
@@ -1180,7 +1198,7 @@ get_addr_size_x_y(struct insn *insn, struct pt_regs *regs,
  * breakpoint is a trap (IP points after 0xcc). */
 static void *
 decode_and_get_addr(void *insn_addr, struct pt_regs *regs, 
-					int *size /* Out */)
+                    int *size /* Out */)
 {
     struct insn insn;
 
@@ -1188,46 +1206,46 @@ decode_and_get_addr(void *insn_addr, struct pt_regs *regs,
     insn_get_length(&insn);
     
     if ((!insn_is_mem_read(&insn) && !insn_is_mem_write(&insn)) || 
-		!is_tracked_memory_op(&insn))
-		return NULL;
-		
-	insn_get_length(&insn);
-	
-	/* Common case: addressing types E and M: Mod R/M, SIB, etc. should be
-	 * analyzed. */
-	if (is_insn_type_e(&insn) || is_insn_movbe(&insn) || 
+        !is_tracked_memory_op(&insn))
+        return NULL;
+        
+    insn_get_length(&insn);
+    
+    /* Common case: addressing types E and M: Mod R/M, SIB, etc. should be
+     * analyzed. */
+    if (is_insn_type_e(&insn) || is_insn_movbe(&insn) || 
         is_insn_cmpxchg8b_16b(&insn))
-		return get_addr_size_common(&insn, regs, size);
-	
-	if (is_insn_type_x(&insn) || is_insn_type_y(&insn))
-		return get_addr_size_x_y(&insn, regs, size);
-	
-	if (is_insn_direct_offset_mov(&insn)) {
-		/* [NB] insn->moffset*.value is signed by default, so we
-		 * cast it to u32 here first to avoid sign extension which would
-		 * lead to incorrectly calculated value of 'imm64' on x86_64. */
-		unsigned long addr = (unsigned long)(u32)insn.moffset1.value;
+        return get_addr_size_common(&insn, regs, size);
+    
+    if (is_insn_type_x(&insn) || is_insn_type_y(&insn))
+        return get_addr_size_x_y(&insn, regs, size);
+    
+    if (is_insn_direct_offset_mov(&insn)) {
+        /* [NB] insn->moffset*.value is signed by default, so we
+         * cast it to u32 here first to avoid sign extension which would
+         * lead to incorrectly calculated value of 'imm64' on x86_64. */
+        unsigned long addr = (unsigned long)(u32)insn.moffset1.value;
 #ifdef CONFIG_X86_64
-		addr = ((unsigned long)insn.moffset2.value << 32) | addr;
-#endif		
+        addr = ((unsigned long)insn.moffset2.value << 32) | addr;
+#endif        
 
-		if (size != NULL)
-			*size = get_mem_size_type_o(&insn);
-		return (void *)addr;
-	}
-	
-	if (is_insn_xlat(&insn)) {
-		/* XLAT: al = *(ebx/rbx + (unsigned)al) */
-		if (size != NULL)
-			*size = 1;
-		return (void *)(regs->bx + (regs->ax & 0xff));
-	}
-	
-	/* A tracked insn of an unknown kind. */
-	pr_warning("[rh] Got a tracked insn of an unknown kind at %pS.\n",
-		insn_addr);
-	WARN_ON_ONCE(1);
-	return NULL;
+        if (size != NULL)
+            *size = get_mem_size_type_o(&insn);
+        return (void *)addr;
+    }
+    
+    if (is_insn_xlat(&insn)) {
+        /* XLAT: al = *(ebx/rbx + (unsigned)al) */
+        if (size != NULL)
+            *size = 1;
+        return (void *)(regs->bx + (regs->ax & 0xff));
+    }
+    
+    /* A tracked insn of an unknown kind. */
+    pr_warning("[rh] Got a tracked insn of an unknown kind at %pS.\n",
+        insn_addr);
+    WARN_ON_ONCE(1);
+    return NULL;
 }
 
 void work_fn_set_soft_bp(struct work_struct *work)
@@ -1235,7 +1253,7 @@ void work_fn_set_soft_bp(struct work_struct *work)
     unsigned long flags;
     struct sw_active *bp;
     /*pr_info("[DBG] set_soft_bp work started\n");*/
-	
+    
     mutex_lock(ptext_mutex);
     spin_lock_irqsave(&sw_lock, flags);
     list_for_each_entry(bp, &active_list, lst) 
@@ -1367,7 +1385,7 @@ rhound_real_handler(void)
     struct return_addr *addr;
     unsigned long sw_flags;
     void *ea;
-	int size = 0;
+    int size = 0;
     int ret = 0;
     
     /*printk("Real handler started, current=%p\n", current);*/
@@ -1383,16 +1401,16 @@ rhound_real_handler(void)
     BUG_ON(&addr->lst == &return_addrs);
     ea = decode_and_get_addr((void *)addr->return_addr, &addr->regs, &size);
     spin_unlock_irqrestore(&sw_lock, sw_flags);
-	
+    
     if (ea == NULL || size == 0) {
-		pr_info("[rh] "
+        pr_info("[rh] "
 "Failed to obtain the address and size of the data accessed at %pS.\n",
-			(void *)addr->return_addr);
+            (void *)addr->return_addr);
         return;
-	}
+    }
     
     /* TODO Choose the appropriate access type: X86_BREAKPOINT_WRITE or
-	 * X86_BREAKPOINT_RW based on the insn. */
+     * X86_BREAKPOINT_RW based on the insn. */
     ret = hw_bp_set((unsigned long)ea,    /* start address of the area */
                     size,                 /* size */
                     X86_BREAKPOINT_WRITE, /* access type */
@@ -1454,6 +1472,9 @@ on_soft_bp_triggered(struct die_args *args)
     if (&swbp->lst != &active_list) // Found
     {
         ret = NOTIFY_STOP; /* our breakpoint, we will handle it */
+        
+        swbp->cpu = raw_smp_processor_id();
+        swbp->task = current;
 
         //<>
         /*pr_info( 
@@ -1820,7 +1841,7 @@ racehound_module_init(void)
     ret = kedr_init_function_subsystem();
     if (ret != 0) {
         pr_err("[rh] "
-			"Error occured in kedr_init_function_subsystem(). Code: %d\n",
+            "Error occured in kedr_init_function_subsystem(). Code: %d\n",
             ret);
         goto out_rmsection;
     }
