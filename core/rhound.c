@@ -1256,6 +1256,39 @@ void work_fn_set_soft_bp(struct work_struct *work)
     
     mutex_lock(ptext_mutex);
     spin_lock_irqsave(&sw_lock, flags);
+    
+    /* Currently, it may be unsafe to track the execution of the target 
+     * while it performs its initialization. To be exact, it may be unsafe
+     * to use kallsyms to resolve the names of the symbols (directly or 
+     * indirectly via %pS in printk(), via dump_stack(), etc.) concurrently
+     * with the operations the module loader performs right after the 
+     * init function of the target returns. In some kernel versions, the 
+     * loader evicted the init-only symbols from the symbol tables at that
+     * point and accessing the symbol tables for the target module resulted
+     * in a race with unpredictable consequences, including occasional 
+     * crashes.
+     * For the present, we do not set the software BPs if the target's 
+     * initialization is still in progress. The delayed work to set the BP
+     * is scheduled as usual, however, so the breakpoint should be set 
+     * eventually. 
+     * 
+     * [NB] module_init is set to NULL by the loader last and the locks act 
+     * as memory barriers among other things, so it seems reasonable to 
+     * check module_init here.
+     * 
+     * TODO: find a way to get around this limitation because it makes it 
+     * impossible to track the initialization of the target where the races
+     * are also quite likely. Either prove that this symbol table race is
+     * no longer possible in the kernels RaceHound supports, or implement
+     * symbol resolution without kallsyms, or output just the sections and
+     * the offsets there and resolve the symbols in user space, or ... */
+    if (target_module && target_module->module_init) {
+        /* pr_warning("[rh] "
+        "Attempt to set a software breakpoint before the initialization "
+        "of the target is complete. Skipping.\n"); */
+        goto out;
+    }
+    
     list_for_each_entry(bp, &active_list, lst) 
     {
         if (!bp->set)
@@ -1266,9 +1299,12 @@ void work_fn_set_soft_bp(struct work_struct *work)
             bp->set = 1;
         }
     }
+    
+out:
     spin_unlock_irqrestore(&sw_lock, flags);
     mutex_unlock(ptext_mutex);
     /*pr_info("[DBG] set_soft_bp work finished\n");*/
+    
     if (target_module)
     {
         schedule_delayed_work(&bp_work, BP_TIMER_INTERVAL);
