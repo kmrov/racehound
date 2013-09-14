@@ -135,6 +135,10 @@ static LIST_HEAD(active_list); // sw_active
 static DEFINE_SPINLOCK(sw_lock);
 /* ====================================================================== */
 
+/* The maximum size of the memory area to check with repeated reads. */
+#define RH_MAX_REP_READ_SIZE sizeof(unsigned long)
+/* ====================================================================== */
+
 #define ADDR_TIMER_INTERVAL (HZ * 1) /* randomize breakpoints each second */
 
 static int random_breakpoints_count = 5;
@@ -203,6 +207,10 @@ static struct hw_bp {
     /* The software breakpoint which handler has set the HW BP, NULL if the
      * HW BP was set without any software BPs (e.g., for debugging. */
     struct sw_active *swbp;
+    
+    /* Nonzero if a race has been found using this HW BP on any CPU, 
+     * 0 otherwise. */
+    int race_found;
 } breakinfo[HBP_NUM];
 
 /* This lock protects accesses to breakinfo[] array. */
@@ -266,7 +274,8 @@ static void hw_bp_handler(struct perf_event *event,
     
     // TODO: if some other data are needed, you may pass them here via
     // breakinfo[i].swbp
-   
+    
+    breakinfo[i].race_found = 1;
     atomic_inc(&race_counter);
 
 out:
@@ -428,9 +437,10 @@ hw_bp_set(unsigned long addr, int len, int type, unsigned long max_delay,
     pevent = per_cpu_ptr(breakinfo[i].pev, cur_cpu);
     pevent[0]->attr.disabled = 0;
     
+    breakinfo[i].race_found = 0;
     breakinfo[i].swbp = swbp;
     breakinfo[i].addr = addr;
-    
+        
     /* [NB] If the whole memory area [addr, addr+len) is larger than a BP 
      * can cover, only one BP will still be set, for simplicity. It will 
      * cover the area starting from addr. */
@@ -523,13 +533,19 @@ hw_bp_clear_impl(struct hw_bp *bp)
 
 /* Clear the HW BP with the given index in breakinfo[]. 
  * The BP is cleared directly on the current CPU, a function is scheduled to
- * clear it on the remaining CPUs. */
-static void
+ * clear it on the remaining CPUs. 
+ *
+ * Returns non-zero if a race has been found by this hardware BP (on any 
+ * CPU) since the BP was set, 0 otherwise. This can be used to decide if
+ * additional race detection techniques, e.g., repeated read, should be 
+ * applied, etc. */
+static int
 hw_bp_clear(int breakno)
 {
     int cpu;
     int cur_cpu = raw_smp_processor_id();
     unsigned long flags;
+    int race_found = 0;
     
     BUG_ON(breakno < 0 || breakno >= HBP_NUM);
     
@@ -542,6 +558,7 @@ hw_bp_clear(int breakno)
         goto out;
     }
     
+    race_found = breakinfo[breakno].race_found;
     hw_bp_clear_impl(&breakinfo[breakno]);
     
     for_each_online_cpu(cpu) {
@@ -583,7 +600,7 @@ hw_bp_clear(int breakno)
     
 out:
     spin_unlock_irqrestore(&hw_bp_lock, flags);
-    return;
+    return race_found;
 }
 
 /* Similar to hw_bp_set_timer_fn but to clear the breakpoints rather than
@@ -1415,6 +1432,7 @@ static struct notifier_block detector_nb = {
 void handler_wrapper(void);
 
 static struct list_head return_addrs;
+
 void 
 rhound_real_handler(void)
 {
@@ -1423,6 +1441,8 @@ rhound_real_handler(void)
     void *ea;
     int size = 0;
     int ret = 0;
+    u8 data[RH_MAX_REP_READ_SIZE];
+    size_t nbytes_to_check;
     
     /*printk("Real handler started, current=%p\n", current);*/
     spin_lock_irqsave(&sw_lock, sw_flags);
@@ -1445,6 +1465,29 @@ rhound_real_handler(void)
         return;
     }
     
+    /* Save the data in the memory area the insn is about to access. We will
+     * check later if they change ("repeated read check"). 
+     * 
+     * [NB] Can we run into our HW BPs triggering due to these reads from
+     * the memory area? Probably yes! But that would mean that some CPU has 
+     * set another HW BP to track the reads & writes for the memory area. 
+     * There are two possible cases:
+     * 1. That CPU has already scheduled a cleanup of that HW BP but the 
+     *    latter haven't executed yet. The HW BP handler will process this
+     *    properly and ignore the event (breakinfo->swbp is NULL during the
+     *    cleanup of HW BPs).
+     * 2. That CPU has not scheduled the cleanup of the HW BPs. That means,
+     *    it waits for the HW BP to trigger. It set it for reads and writes
+     *    so the instruction to be executed on that CPU writes to this 
+     *    memory area and hence it is a race and it will be reported. 
+     *    Unfortunately, we'll get the info about only one of the 
+     *    conflicting accesses in this case (the other one will point to 
+     *    this place in RaceHound itself). Should not be a big problem. */
+    nbytes_to_check = RH_MAX_REP_READ_SIZE;
+    if (nbytes_to_check > (size_t)size)
+        nbytes_to_check = (size_t)size;
+    memcpy(&data[0], ea, nbytes_to_check);
+    
     /* TODO Choose the appropriate access type: X86_BREAKPOINT_WRITE or
      * X86_BREAKPOINT_RW based on the insn. */
     ret = hw_bp_set((unsigned long)ea,    /* start address of the area */
@@ -1453,9 +1496,29 @@ rhound_real_handler(void)
                     delay,
                     addr->swbp);
     if (ret >= 0) {
+        int race_found;
+        
         /* [NB] Can be called from any context. */
         mdelay(delay);
-        hw_bp_clear(ret);
+        race_found = hw_bp_clear(ret);
+        
+        /* If we haven't found a race using the HW BP this time, let us 
+         * check if the data in the accessed memory area have changed 
+         * ("repeated read technique"). */
+        if (!race_found && memcmp(&data[0], ea, nbytes_to_check) != 0) {
+            struct task_struct *first_task = addr->swbp->task;
+            int first_cpu = addr->swbp->cpu;
+            const char *first_comm = first_task->comm;
+            
+            pr_info("[rh] Detected a data race on the memory at %p "
+            "that is about to be accessed by the instruction at "
+            "%p (%pS, CPU=%d, task_struct=%p, comm: \"%s\"): "
+        "the contents of that memory area have changed during the delay.\n",
+                ea, 
+                (void *)addr->return_addr, (void *)addr->return_addr,
+                first_cpu, first_task, first_comm);
+            atomic_inc(&race_counter);
+        }
     }
     else {
         pr_warning("[rh] Failed to set a hardware breakpoint at %p.\n", 
