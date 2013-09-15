@@ -1377,7 +1377,7 @@ rhound_detector_notifier_call(struct notifier_block *nb,
                         
                 func = kzalloc(sizeof(*func), GFP_KERNEL);
                 
-                func->func_name = kzalloc(strlen(pos->name), GFP_KERNEL);
+                func->func_name = kzalloc(strlen(pos->name) + 1, GFP_KERNEL);
                 strcpy(func->func_name, pos->name);
                 func->addr = pos->addr;
                 func->offsets_len = 0;
