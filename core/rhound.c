@@ -514,7 +514,8 @@ hw_bp_clear_impl(struct hw_bp *bp)
     
     pevent = per_cpu_ptr(bp->pev, cpu);
     if (pevent[0]->attr.disabled) {
-        pr_info("[DBG] The HW BP is already disabled, leaving it as is.\n");
+        /*pr_info(
+         "[DBG] The HW BP is already disabled, leaving it as is.\n"); */
         return;
     }
     
