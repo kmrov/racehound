@@ -121,8 +121,8 @@ set(RH_UM_HELPER_PATH "${RH_INSTALL_PREFIX_EXEC}")
 #######################################################################
 # Perform basic checks
 
-# Check if we use kernel version 2.6.33 or newer
-check_kernel_version(2 6 33)
+# Check if we use kernel version 3.2 or newer
+check_kernel_version(3 2 0)
 
 # Check if kernel modules can be built on this system
 check_module_build()
