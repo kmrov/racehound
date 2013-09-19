@@ -557,15 +557,11 @@ hw_bp_clear(int breakno)
     }
     
     race_found = breakinfo[breakno].race_found;
-    hw_bp_clear_impl(&breakinfo[breakno]);
-    
+        
     for_each_online_cpu(cpu) {
         struct timer_list *t = NULL;
         struct perf_event **pevent = NULL;
         int was_pending = 0;
-        
-        if (cpu == cur_cpu)
-            continue;
         
         /* Remove the scheduled setting of the BP first, in case it is still
          * pending. */
@@ -590,10 +586,15 @@ hw_bp_clear(int breakno)
             continue;
         }
         
-        t = per_cpu_ptr(breakinfo[breakno].timers_clear, cpu);
-        t->data = (unsigned long)&breakinfo[breakno];
-        t->expires = jiffies;
-        add_timer_on(t, cpu);
+        if (cpu == cur_cpu) {
+            hw_bp_clear_impl(&breakinfo[breakno]);
+        }
+        else {
+            t = per_cpu_ptr(breakinfo[breakno].timers_clear, cpu);
+            t->data = (unsigned long)&breakinfo[breakno];
+            t->expires = jiffies;
+            add_timer_on(t, cpu);
+        }
     }
     
 out:
