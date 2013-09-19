@@ -920,57 +920,44 @@ static void racehound_sync_ranges_with_pool(void)
     
     list_for_each_entry(bprange, &ranges_list, lst)
     {
-        if (bprange->func_name)
+        list_for_each_entry(func, &available_list, lst) 
         {
-            list_for_each_entry(func, &available_list, lst) 
+            if ( (strcmp(func->func_name, bprange->func_name) == 0) )
             {
-                if ( (strcmp(func->func_name, bprange->func_name) == 0) )
+                break;
+            }
+        }
+        if (&func->lst == &available_list)
+        {
+            if (target_module) {
+                pr_warning("[rh] Warning: function %s not found.\n", 
+                            bprange->func_name);
+            }
+            continue;
+        }
+
+        if (bprange->offset != RH_ALL_OFFSETS)
+        {
+            for (i = 0; i < func->offsets_len; i++)
+            {
+                if (func->offsets[i] == bprange->offset)
                 {
+                    add_used_breakpoint(func, i);
                     break;
                 }
             }
-            if (&func->lst == &available_list)
+            if (i == func->offsets_len)
             {
-                if (target_module) {
-                    pr_warning("[rh] Warning: function %s not found.\n", 
-                               bprange->func_name);
-                }
-                continue;
-            }
-
-            if (bprange->offset != RH_ALL_OFFSETS)
-            {
-                for (i = 0; i < func->offsets_len; i++)
-                {
-                    if (func->offsets[i] == bprange->offset)
-                    {
-                        add_used_breakpoint(func, i);
-                        break;
-                    }
-                }
-                if (i == func->offsets_len)
-                {
-                    pr_warning("[rh] "
-                        "Warning: offset %x in function %s not found.\n", 
-                        bprange->offset, bprange->func_name);
-                }
-            }
-            else
-            {
-                for (i = 0; i < func->offsets_len; i++)
-                {
-                    add_used_breakpoint(func, i);
-                }
+                pr_warning("[rh] "
+                    "Warning: offset %x in function %s not found.\n", 
+                    bprange->offset, bprange->func_name);
             }
         }
         else
         {
-            list_for_each_entry(func, &available_list, lst) 
+            for (i = 0; i < func->offsets_len; i++)
             {
-                for (i = 0; i < func->offsets_len; i++)
-                {
-                    add_used_breakpoint(func, i);
-                }
+                add_used_breakpoint(func, i);
             }
         }
     }
