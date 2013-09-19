@@ -148,8 +148,11 @@ static unsigned long delay = 80;
 module_param(delay, ulong, S_IRUGO);
 /* ====================================================================== */
 
+/* A special value of the offset that means "all suitable offsets". */
+#define RH_ALL_OFFSETS ((unsigned int)(-1))
+
 /* Offset of the insn in the target function to set the sw bp to. */
-static unsigned int bp_offset = 0x11;
+static unsigned int bp_offset = RH_ALL_OFFSETS;
 module_param(bp_offset, int, S_IRUGO);
 
 // TODO: Make this a parameter of the module too?
@@ -882,7 +885,7 @@ static void racehound_sync_ranges_with_pool(void)
                 continue;
             }
 
-            if (bprange->offset)
+            if (bprange->offset != RH_ALL_OFFSETS)
             {
                 for (i = 0; i < func->offsets_len; i++)
                 {
@@ -1676,12 +1679,18 @@ static int bp_file_open(struct inode *inode, struct file *filp)
     char *bp_list = NULL, *list_tmp = NULL;
     int list_len = 0, entry_len = 0;
     unsigned long flags;
+    static const char *fmt = "%s+0x%x\n";
+    static const char *fmt_all = "%s+*\n";
     
     spin_lock_irqsave(&sw_lock, flags);
     list_for_each_entry(bp, &ranges_list, lst) 
     {
-        list_len += snprintf(NULL, 0, "%s+0x%x\n", bp->func_name,
-                                                   bp->offset);
+        if (bp->offset != RH_ALL_OFFSETS) {
+            list_len += snprintf(NULL, 0, fmt, bp->func_name, bp->offset);
+        }
+        else {
+            list_len += snprintf(NULL, 0, fmt_all, bp->func_name);
+        }
         
     }
     
@@ -1695,11 +1704,14 @@ static int bp_file_open(struct inode *inode, struct file *filp)
     list_tmp = bp_list;
     list_for_each_entry(bp, &ranges_list, lst)
     {
-        entry_len = snprintf(NULL, 0, "%s+0x%x\n", bp->func_name,
-                                                   bp->offset);
-
-        snprintf(list_tmp, entry_len + 1, "%s+0x%x\n", bp->func_name,
-                                                       bp->offset);
+        if (bp->offset != RH_ALL_OFFSETS) {
+            entry_len = snprintf(NULL, 0, fmt, bp->func_name, bp->offset);
+            snprintf(list_tmp, entry_len + 1, fmt, bp->func_name, bp->offset);
+        }
+        else {
+            entry_len = snprintf(NULL, 0, fmt_all, bp->func_name);
+            snprintf(list_tmp, entry_len + 1, fmt_all, bp->func_name);
+        }
         list_tmp += entry_len;
     }
     spin_unlock_irqrestore(&sw_lock, flags);
@@ -1789,7 +1801,8 @@ static ssize_t bp_file_write(struct file *filp, const char __user *buf,
             *p = '\0';
             if (*offset == '*')
             {
-                offset_val = 0;
+                /* All suitable instructions in the function will be used.*/
+                offset_val = RH_ALL_OFFSETS;
             }
             else
             {
