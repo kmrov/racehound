@@ -931,8 +931,10 @@ static void racehound_sync_ranges_with_pool(void)
             }
             if (&func->lst == &available_list)
             {
-                pr_warning("[rh] Warning: function %s not found.\n", 
-                           bprange->func_name);
+                if (target_module) {
+                    pr_warning("[rh] Warning: function %s not found.\n", 
+                               bprange->func_name);
+                }
                 continue;
             }
 
