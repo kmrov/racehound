@@ -767,9 +767,16 @@ addr_work_fn(struct work_struct *work)
         pool_length++;
     }
 
-    if (count > pool_length)
+    if (count >= pool_length)
     {
-        count = pool_length;
+        /* We are behind the limit, so all the BPs from 'used_list' can be 
+         * set. No need to use randomization, etc. */
+        list_for_each_entry(bpused, &used_list, lst) 
+        {
+            racehound_add_breakpoint(bpused->func_name, bpused->offset);
+            bpused->chosen = 1;
+        }
+        goto out;
     }
     
     for (i = 0; i < count; i++)
@@ -789,6 +796,10 @@ addr_work_fn(struct work_struct *work)
                         gen = 0;
                         racehound_add_breakpoint(bpused->func_name,
                                                  bpused->offset);
+                        bpused->chosen = 1;
+                    }
+                    else {
+                        break;
                     }
                 }
                 j++;
@@ -797,6 +808,7 @@ addr_work_fn(struct work_struct *work)
         }
     }
 
+out:
     spin_unlock_irqrestore(&sw_lock, flags);
     mutex_unlock(ptext_mutex);
 
