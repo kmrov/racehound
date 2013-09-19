@@ -125,13 +125,6 @@ struct return_addr
 };
 
 static LIST_HEAD(available_list);
-
-struct swbp_work 
-{
-    struct work_struct wrk;
-    struct sw_active *bp;
-};
-
 static LIST_HEAD(ranges_list); // addr_range
 static LIST_HEAD(used_list);   // sw_used
 static LIST_HEAD(active_list); // sw_active
@@ -731,8 +724,8 @@ fail:
 }
 
 
-int racehound_add_breakpoint(char *func_name, unsigned int offset);
-void racehound_sync_ranges_with_pool(void);
+static int racehound_add_breakpoint(char *func_name, unsigned int offset);
+static void racehound_sync_ranges_with_pool(void);
 
 static void
 addr_work_fn(struct work_struct *work)
@@ -808,7 +801,8 @@ addr_work_fn(struct work_struct *work)
     //pr_info("[DBG] addr_work_fn finished\n");
 }
 
-void racehound_add_breakpoint_range(char *func_name, unsigned int offset)
+static void 
+racehound_add_breakpoint_range(char *func_name, unsigned int offset)
 {
     unsigned long flags;
     struct addr_range *range;
@@ -823,7 +817,8 @@ void racehound_add_breakpoint_range(char *func_name, unsigned int offset)
     spin_unlock_irqrestore(&sw_lock, flags);
 }
 
-void racehound_remove_breakpoint_range(char *func_name, unsigned int offset)
+static void 
+racehound_remove_breakpoint_range(char *func_name, unsigned int offset)
 {
     unsigned long flags;
     struct addr_range *pos = NULL, *n = NULL;
@@ -841,7 +836,7 @@ void racehound_remove_breakpoint_range(char *func_name, unsigned int offset)
     spin_unlock_irqrestore(&sw_lock, flags);
 }
 
-void add_used_breakpoint(struct sw_available *func, int index)
+static void add_used_breakpoint(struct sw_available *func, int index)
 {
     struct sw_used *bpused = kzalloc(sizeof(*bpused), GFP_ATOMIC);
     bpused->offset = func->offsets[index];
@@ -851,7 +846,7 @@ void add_used_breakpoint(struct sw_available *func, int index)
 }
 
 /* Should be called with sw_lock locked */
-void racehound_sync_ranges_with_pool(void)
+static void racehound_sync_ranges_with_pool(void)
 {
     struct addr_range *bprange = NULL;
     struct sw_used *bpused = NULL, *n = NULL;
@@ -932,7 +927,7 @@ void racehound_sync_ranges_with_pool(void)
 }
 
 /* Should be called with ptext_mutex and sw_lock locked */
-int racehound_add_breakpoint(char *func_name, unsigned int offset)
+static int racehound_add_breakpoint(char *func_name, unsigned int offset)
 {
     struct sw_available *pos;
     struct sw_active *swbp = kzalloc(sizeof(struct sw_active), GFP_KERNEL);
@@ -962,34 +957,6 @@ int racehound_add_breakpoint(char *func_name, unsigned int offset)
     return !found;
 }
 
-/* Should be called with ptext_mutex locked */
-void racehound_remove_breakpoint(char *func_name, unsigned int offset)
-{
-    unsigned long flags;
-    struct sw_active *pos = NULL;
-    BUG_ON(!mutex_is_locked(ptext_mutex));
-    spin_lock_irqsave(&sw_lock, flags);
-    list_for_each_entry(pos, &active_list, lst) 
-    {
-        if ( (strcmp(pos->func_name, func_name) == 0) && (pos->offset == offset) )
-        {
-            if (pos->addr != NULL && pos->set) 
-            {
-                do_text_poke(pos->addr, &(pos->orig_byte), 1);
-                pos->set = 0;
-                pos->cpu = -1;
-                pos->task = NULL;
-            }
-            list_del(&pos->lst);
-            kfree(pos->func_name);
-            kfree(pos);
-            break;
-        }
-    }
-    spin_unlock_irqrestore(&sw_lock, flags);
-}
-
-
 static int process_insn(struct insn* insn, void* params)
 {
     int i;
@@ -1012,7 +979,8 @@ static int process_insn(struct insn* insn, void* params)
         {
             if (func->offsets_len < CHUNK_SIZE)
             {
-                func->offsets[func->offsets_len] = (unsigned long) insn->kaddr - (unsigned long) func->addr;
+                func->offsets[func->offsets_len] = 
+                    (unsigned long) insn->kaddr - (unsigned long) func->addr;
                 func->offsets_len++;
             }
             else
@@ -1270,7 +1238,7 @@ decode_and_get_addr(void *insn_addr, struct pt_regs *regs,
     return NULL;
 }
 
-void work_fn_set_soft_bp(struct work_struct *work)
+static void work_fn_set_soft_bp(struct work_struct *work)
 {
     unsigned long flags;
     struct sw_active *bp;
@@ -1333,7 +1301,7 @@ out:
     }
 }
 
-void detach_from_target(void)
+static void detach_from_target(void)
 {
     cancel_delayed_work_sync(&bp_work);
     cancel_delayed_work_sync(&addr_work);
@@ -1436,7 +1404,7 @@ static struct notifier_block detector_nb = {
 
 void handler_wrapper(void);
 
-static struct list_head return_addrs;
+static LIST_HEAD(return_addrs);
 
 static short can_sleep(void)
 {
