@@ -28,6 +28,10 @@
 #include <linux/kdebug.h>
 #include <linux/notifier.h>
 
+#include <linux/irqflags.h>
+#include <linux/kgdb.h>
+#include <linux/hardirq.h>
+
 #include <asm/debugreg.h>
 #include <asm/processor.h>
 
@@ -1434,6 +1438,14 @@ void handler_wrapper(void);
 
 static struct list_head return_addrs;
 
+static short can_sleep(void)
+{
+    /* From include/drm/drmP.h */
+    if (in_atomic() || in_dbg_master() || irqs_disabled())
+        return 0;
+    return 1;
+}
+
 void 
 rhound_real_handler(void)
 {
@@ -1499,8 +1511,17 @@ rhound_real_handler(void)
     if (ret >= 0) {
         int race_found;
         
-        /* [NB] Can be called from any context. */
-        mdelay(delay);
+        /* If the process can sleep, it's better to use msleep() because it 
+         * allows scheduling another job on this CPU. 
+         */
+        if (can_sleep())
+        {
+            msleep(delay);
+        }
+        else 
+        {   
+            mdelay(delay);
+        }
         race_found = hw_bp_clear(ret);
         
         /* If we haven't found a race using the HW BP this time, let us 
