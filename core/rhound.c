@@ -1703,40 +1703,46 @@ struct file_operations race_counter_file_ops = {
 
 static int bp_file_open(struct inode *inode, struct file *filp)
 {
-    struct sw_active *bp;
+    struct addr_range *bp;
     char *bp_list = NULL, *list_tmp = NULL;
     int list_len = 0, entry_len = 0;
     unsigned long flags;
+    
     spin_lock_irqsave(&sw_lock, flags);
-    list_for_each_entry(bp, &active_list, lst) 
+    list_for_each_entry(bp, &ranges_list, lst) 
     {
-        if (bp->set)
-        {
-            list_len += snprintf(NULL, 0, "%s+0x%x\n", bp->func_name,
-                                                       bp->offset);
-        }
+        list_len += snprintf(NULL, 0, "%s+0x%x\n", bp->func_name,
+                                                   bp->offset);
+        
     }
-    bp_list = kmalloc(list_len+1, GFP_ATOMIC);
+    
+    bp_list = kmalloc(list_len + 1, GFP_ATOMIC);
     if (bp_list == NULL)
     {
+        spin_unlock_irqrestore(&sw_lock, flags);
         return -ENOMEM;
     }
+    
     list_tmp = bp_list;
-    list_for_each_entry(bp, &active_list, lst)
+    list_for_each_entry(bp, &ranges_list, lst)
     {
-        if (bp->set)
-        {
-            entry_len = snprintf(NULL, 0, "%s+0x%x\n", bp->func_name,
-                                                       bp->offset);
+        entry_len = snprintf(NULL, 0, "%s+0x%x\n", bp->func_name,
+                                                   bp->offset);
 
-            snprintf(list_tmp, entry_len + 1, "%s+0x%x\n", bp->func_name,
-                                                           bp->offset);
-            list_tmp += entry_len;
-        }
+        snprintf(list_tmp, entry_len + 1, "%s+0x%x\n", bp->func_name,
+                                                       bp->offset);
+        list_tmp += entry_len;
     }
     spin_unlock_irqrestore(&sw_lock, flags);
+    
     bp_list[list_len] = '\0';
     filp->private_data = bp_list;
+    return nonseekable_open(inode, filp);
+}
+
+static int bp_file_release(struct inode *inode, struct file *filp)
+{
+    kfree(filp->private_data);
     return 0;
 }
 
@@ -1748,11 +1754,11 @@ static ssize_t bp_file_read(struct file *filp, char __user *buf,
     char *bp_list = filp->private_data;
     
     if (bp_list == NULL)
-    {
-        return -EINVAL;
-    }
+        return 0; /* The list is empty - nothing to show. */
 
     len = strlen(bp_list);
+    if (*f_pos >= len)
+        return 0; /* EOF already. */
     
     if (count + *f_pos > len)
     {
@@ -1766,7 +1772,6 @@ static ssize_t bp_file_read(struct file *filp, char __user *buf,
     }
     (*f_pos) += count;
     return count;
-
 }
 
 static ssize_t bp_file_write(struct file *filp, const char __user *buf,
@@ -1849,7 +1854,8 @@ struct file_operations bp_file_ops = {
     .owner = THIS_MODULE,
     .open = bp_file_open,
     .read = bp_file_read,
-    .write = bp_file_write
+    .write = bp_file_write,
+    .release = bp_file_release
 };
 
 static int __init
