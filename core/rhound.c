@@ -1426,11 +1426,21 @@ rhound_detector_notifier_call(struct notifier_block *nb,
             }
                             
             list_for_each_entry(pos, &tmod_funcs, list) {
-                        
                 func = kzalloc(sizeof(*func), GFP_KERNEL);
+                if (func == NULL) {
+                    pr_warning(
+                    "[rh] rhound_detector_notifier_call: out of memory.\n");
+                    continue;
+                }
                 
-                func->func_name = kzalloc(strlen(pos->name) + 1, GFP_KERNEL);
-                strcpy(func->func_name, pos->name);
+                func->func_name = kstrdup(pos->name, GFP_KERNEL);
+                if (func->func_name == NULL) {
+                    pr_warning(
+                    "[rh] rhound_detector_notifier_call: out of memory.\n");
+                    kfree(func);
+                    continue;
+                }
+                
                 func->addr = pos->addr;
                 func->offsets_len = 0;
                 INIT_LIST_HEAD(&(func->lst));    
