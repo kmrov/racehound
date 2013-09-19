@@ -805,19 +805,58 @@ addr_work_fn(struct work_struct *work)
     //pr_info("[DBG] addr_work_fn finished\n");
 }
 
+/* [NB] Must be called under sw_lock. */
+static struct addr_range *
+addr_range_find(char *func_name, unsigned int offset)
+{
+    struct addr_range *pos = NULL;
+    list_for_each_entry(pos, &ranges_list, lst) 
+    {
+        if ((strcmp(pos->func_name, func_name) == 0) && 
+            (pos->offset == offset))
+            return pos;
+    }
+    return NULL;
+}
+
 static void 
 racehound_add_breakpoint_range(char *func_name, unsigned int offset)
 {
     unsigned long flags;
     struct addr_range *range;
+    
     spin_lock_irqsave(&sw_lock, flags);
-    range = kzalloc(sizeof(struct addr_range), GFP_ATOMIC);
+    range = addr_range_find(func_name, offset);
+    if (range != NULL) {
+        if (offset == RH_ALL_OFFSETS) {
+            pr_warning("[rh] Breakpoint range '%s+*' already exists.\n",
+                func_name);
+        }
+        else {
+            pr_warning("[rh] Breakpoint '%s+0x%x' already exists.\n",
+                func_name, offset);
+        }
+        goto out;
+    }
+    
+    range = kzalloc(sizeof(*range), GFP_ATOMIC);
+    if (range == NULL) {
+        pr_warning("[rh] racehound_add_breakpoint_range: out of memory.\n");
+        goto out;
+    }
+    
     range->offset = offset;
-    range->func_name = kzalloc(strlen(func_name)+1, GFP_ATOMIC);
-    strcpy(range->func_name, func_name);
-    INIT_LIST_HEAD(&range->lst);
+    range->func_name = kstrdup(func_name, GFP_ATOMIC);
+    if (range->func_name == NULL) {
+        pr_warning("[rh] racehound_add_breakpoint_range: out of memory.\n");
+        kfree(range);
+        goto out;
+    }
+    
     list_add_tail(&range->lst, &ranges_list);
     racehound_sync_ranges_with_pool();
+    
+out:
     spin_unlock_irqrestore(&sw_lock, flags);
 }
 
@@ -825,18 +864,30 @@ static void
 racehound_remove_breakpoint_range(char *func_name, unsigned int offset)
 {
     unsigned long flags;
-    struct addr_range *pos = NULL, *n = NULL;
+    struct addr_range *range = NULL;
+    
     spin_lock_irqsave(&sw_lock, flags);
-    list_for_each_entry_safe(pos, n, &ranges_list, lst) 
-    {
-        if ( (strcmp(pos->func_name, func_name) == 0) && (pos->offset == offset) )
-        {
-            list_del(&pos->lst);
-            kfree(pos->func_name);
-            kfree(pos);
+    range = addr_range_find(func_name, offset);
+    
+    if (range == NULL) {
+        if (offset == RH_ALL_OFFSETS) {
+            pr_warning("[rh] Unknown breakpoint range: '%s+*'.\n",
+                       func_name);
         }
+        else {
+            pr_warning("[rh] Unknown breakpoint: '%s+0x%x'.\n", func_name, 
+                       offset);
+        }
+        goto out;
     }
+    
+    list_del(&range->lst);
+    kfree(range->func_name);
+    kfree(range);
+
     racehound_sync_ranges_with_pool();
+
+out:
     spin_unlock_irqrestore(&sw_lock, flags);
 }
 
@@ -1315,6 +1366,9 @@ static void detach_from_target(void)
         cleanup_hw_breakpoints();
         target_module = NULL;
     }
+    
+    // TODO:
+    // clear available_list and used_list
 }
 
 static int 
@@ -1982,10 +2036,19 @@ out:
 static void __exit 
 racehound_module_exit(void)
 {
+    struct addr_range *pos = NULL;
+    struct addr_range *tmp = NULL;
+    
     unregister_module_notifier(&detector_nb);
     unregister_die_notifier(&die_nb);
 
     detach_from_target();
+    
+    list_for_each_entry_safe(pos, tmp, &ranges_list, lst) {
+        list_del(&pos->lst);
+        kfree(pos->func_name);
+        kfree(pos);
+    }
 
     kedr_cleanup_function_subsystem();
     kedr_cleanup_section_subsystem();
