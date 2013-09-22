@@ -76,8 +76,13 @@ extern struct list_head tmod_funcs;
 #define RH_MAX_REP_READ_SIZE sizeof(unsigned long)
 /* ====================================================================== */
 
-// TODO: make this interval a parameter
-#define ADDR_TIMER_INTERVAL (HZ * 1) /* randomize breakpoints each second */
+/* The set of the instructions software breakpoints are placed to will be
+ * updated each 'bp_update_interval' seconds, possibly with random choice of
+ * the insns among the available ones.
+ * If this parameter is 0, the software breakpoints will remain where they
+ * have been initially set. No randomization will take place. */
+static unsigned int bp_update_interval = 1;
+module_param(bp_update_interval, uint, S_IRUGO);
 
 static int random_breakpoints_count = 5;
 module_param(random_breakpoints_count, int, S_IRUGO);
@@ -94,7 +99,7 @@ module_param(delay, ulong, S_IRUGO);
 
 /* Offset of the insn in the target function to set the sw bp to. */
 static unsigned int bp_offset = RH_ALL_OFFSETS;
-module_param(bp_offset, int, S_IRUGO);
+module_param(bp_offset, uint, S_IRUGO);
 
 #define BP_TIMER_INTERVAL (HZ / 10)
 
@@ -868,7 +873,7 @@ do_update_bps(void)
         pool_length++;
     }
 
-    if (count >= pool_length)
+    if (count >= pool_length || bp_update_interval == 0)
     {
         /* We are behind the limit, so all the BPs from 'used_list' can be 
          * set. No need to use randomization, etc. */
@@ -915,8 +920,10 @@ out:
 static void
 addr_work_fn(struct work_struct *work)
 {
-    do_update_bps();    
-    schedule_delayed_work(&addr_work, ADDR_TIMER_INTERVAL);
+    do_update_bps();
+
+    if (bp_update_interval != 0)
+        schedule_delayed_work(&addr_work, HZ * bp_update_interval);
 }
 
 /* [NB] Must be called under sw_lock. */
