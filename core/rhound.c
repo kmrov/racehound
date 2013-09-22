@@ -84,8 +84,8 @@ module_param(random_breakpoints_count, int, S_IRUGO);
 
 /* How long to wait with a HW BP armed (in milliseconds). The HW BP will be 
  * set for this period of time to detect accesses to the given memory area.
- */
-static unsigned long delay = 80;
+ * If it is 0, the default value corresponding to 5 jiffies will be used. */
+static unsigned long delay = 0;
 module_param(delay, ulong, S_IRUGO);
 /* ====================================================================== */
 
@@ -2206,6 +2206,9 @@ racehound_module_init(void)
     INIT_LIST_HEAD(&ranges_list);
 
     INIT_LIST_HEAD(&return_addrs);
+    
+    if (delay == 0)
+        delay = jiffies_to_msecs(5);
 
     ret = find_kernel_api();
     if (ret != 0) {
