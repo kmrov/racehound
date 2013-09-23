@@ -78,7 +78,7 @@ debug_write_common(struct file *filp, const char __user *buf, size_t count,
 	
 	if (mutex_lock_killable(&section_mutex) != 0)
 	{
-		pr_warning("[sample] debug_write_common: "
+		pr_warning("[rh] debug_write_common: "
 			"got a signal while trying to acquire a mutex.\n");
 		return -EINTR;
 	}
@@ -92,7 +92,7 @@ debug_write_common(struct file *filp, const char __user *buf, size_t count,
 	
 	/* We only accept data that fit into the buffer as a whole. */
 	if (pos + count >= KEDR_SECTION_BUFFER_SIZE - 1) {
-		pr_warning("[sample] debug_write_common: "
+		pr_warning("[rh] debug_write_common: "
 		"a request to write %u bytes while the in-kernel buffer "
 		"is only %u bytes long (without the terminating 0).\n",
 			(unsigned int)count, 
@@ -148,7 +148,7 @@ kedr_run_um_helper(char *target_name)
 	 */
 	ret_status = (unsigned int)ret & 0xff;
 	if (ret_status != 0) {
-		pr_warning("[sample] Failed to execute %s, status is 0x%x\n",
+		pr_warning("[rh] Failed to execute %s, status is 0x%x\n",
 			rh_get_sections_path, ret_status);
 		return -EINVAL;
 	}
@@ -156,9 +156,9 @@ kedr_run_um_helper(char *target_name)
 	ret >>= 8;
 	if (ret != 0) {
 		if (ret == 127) 
-			pr_info("[sample] %s is missing.\n", rh_get_sections_path);
+			pr_info("[rh] %s is missing.\n", rh_get_sections_path);
 		else 
-			pr_info("[sample] "
+			pr_info("[rh] "
 			"The helper failed, error code: %d. "
 			"See the comments in %s for the description of this error code.\n",
 			ret, rh_get_sections_path);
@@ -227,7 +227,7 @@ kedr_init_section_subsystem(struct dentry *debugfs_dir)
 	data_file = debugfs_create_file(debug_data_name, 
 		S_IWUSR | S_IWGRP, debugfs_dir, NULL, &fops_wo);
 	if (data_file == NULL) {
-		pr_err("[sample] "
+		pr_err("[rh] "
 			"failed to create data channel file in debugfs\n");
 		ret = -EINVAL;
 		goto out_free_sb;
@@ -257,7 +257,7 @@ reset_section_subsystem(void)
 	BUG_ON(section_buffer == NULL);
 	if (mutex_lock_killable(&section_mutex) != 0)
 	{
-		pr_warning("[sample] kedr_reset_section_subsystem: "
+		pr_warning("[rh] kedr_reset_section_subsystem: "
 			"got a signal while trying to acquire a mutex.\n");
 		return -EINTR;
 	}
@@ -355,24 +355,24 @@ kedr_get_sections(char *target_name)
 	 * the buffer may change after we release the mutex. */
 	if (mutex_lock_killable(&section_mutex) != 0)
 	{
-		pr_warning("[sample] kedr_get_sections: "
+		pr_warning("[rh] kedr_get_sections: "
 			"got a signal while trying to acquire a mutex.\n");
 		return ERR_PTR(-EINTR);
 	}
 	
 	ret = parse_section_data();
 	if (ret != 0) {
-		pr_warning("[sample] "
+		pr_warning("[rh] "
 		"Failed to parse section data for \"%s\" module.\n",
 			target_name);
-		pr_warning("[sample] "
+		pr_warning("[rh] "
 		"The buffer contains the following: %s\n",
 			section_buffer);
 		goto out;
 	}
 	
 	if (list_empty(&sections)) {
-		pr_warning("[sample] "
+		pr_warning("[rh] "
 		"no section information found for \"%s\" module.\n",
 			target_name);
 		ret = -EINVAL;
@@ -395,10 +395,10 @@ kedr_print_section_info(char *target_name)
 	if (IS_ERR(section_list))
 		return PTR_ERR(section_list);
 	
-	pr_info("[sample] List of sections for \"%s\" module:\n", 
+	pr_info("[rh] List of sections for \"%s\" module:\n", 
 		target_name);
 	list_for_each_entry(s, section_list, list) {
-		pr_info("[sample] %s at 0x%lx\n", s->name, s->addr);
+		pr_info("[rh] %s at 0x%lx\n", s->name, s->addr);
 	}
 	return 0;
 }

@@ -55,27 +55,104 @@ module_param(target_function, charp, S_IRUGO);
 
 static struct module* target_module = NULL;
 
-struct dentry *debugfs_dir_dentry = NULL;
-const char *debugfs_dir_name = "rhound";
+/* The memory area to contain the detour buffers for the instructions of 
+ * interest. Should be allocated from the module mapping space to be within
+ * reach of the target's code (important on x86-64). */
+static void *detour_area = NULL;
+
+static struct dentry *debugfs_dir_dentry = NULL;
+static const char *debugfs_dir_name = "rhound";
 
 /* Counter for the races found */
-struct dentry *race_counter_file = NULL;
-atomic_t race_counter = ATOMIC_INIT(0);
+static struct dentry *race_counter_file = NULL;
+static atomic_t race_counter = ATOMIC_INIT(0);
 
 struct dentry *bp_file = NULL;
 
 extern struct list_head tmod_funcs;
 /* ====================================================================== */
 
-#define CHUNK_SIZE 4096
+/* The maximum size of the memory area to check with repeated reads. */
+#define RH_MAX_REP_READ_SIZE sizeof(unsigned long)
+/* ====================================================================== */
+
+/* The set of the instructions software breakpoints are placed to will be
+ * updated each 'bp_update_interval' seconds, possibly with random choice of
+ * the insns among the available ones.
+ * If this parameter is 0, the software breakpoints will remain where they
+ * have been initially set. No randomization will take place. */
+static unsigned int bp_update_interval = 1;
+module_param(bp_update_interval, uint, S_IRUGO);
+
+static int random_breakpoints_count = 5;
+module_param(random_breakpoints_count, int, S_IRUGO);
+
+/* How long to wait with a HW BP armed (in milliseconds). The HW BP will be 
+ * set for this period of time to detect accesses to the given memory area.
+ * If it is 0, the default value corresponding to 5 jiffies will be used. */
+static unsigned long delay = 0;
+module_param(delay, ulong, S_IRUGO);
+/* ====================================================================== */
+
+/* A special value of the offset that means "all suitable offsets". */
+#define RH_ALL_OFFSETS ((unsigned int)(-1))
+
+/* Offset of the insn in the target function to set the sw bp to. */
+static unsigned int bp_offset = RH_ALL_OFFSETS;
+module_param(bp_offset, uint, S_IRUGO);
+
+#define BP_TIMER_INTERVAL (HZ / 10)
+
+/* We do not set SW BPs during the initialization of the target. If needed,
+ * this work is scheduled to do it after the initialization finishes. */
+static void sw_bp_work_fn(struct work_struct *work);
+static DECLARE_DELAYED_WORK(bp_work, sw_bp_work_fn);
+
+static void addr_work_fn(struct work_struct *work);
+static DECLARE_DELAYED_WORK(addr_work, addr_work_fn);
+
+/* Opcode for a software breakpoint instruction on x86. */
+static u8 soft_bp = 0xcc;
+/* ====================================================================== */
+
+/* Length of a JMP near relative on x86. */
+#define RH_JMP_LEN 5
+
+struct insn_data {
+    /* Offset of the insn from the start of the function. */
+    unsigned int offset_in_func;
+    
+    /* Offset of the detour buffer for the insn from the start of the 
+     * detour area. 
+     *
+     * The detour buffer for an insn contains a copy of the insn (properly
+     * relocated if necessary) followed by a jump to the next insn in the
+     * target module.
+     * 
+     * When a SW BP is placed on an insn, the control will be passed to the
+     * detour buffer after the handling has been done. The instruction will
+     * execute there while the BP will remain set on the original one. This
+     * allows to avoid medding with periodical BP reset and other 
+     * not-always-reliable stuff. 
+     *
+     * Note that we take into account which kinds of insns we handle. 
+     * Fortunately, they can be executed in detour buffers while it is not
+     * always possible in the general case. */
+    unsigned int offset_in_detour;
+};
 
 struct sw_available {
-    char *func_name;
-    void *addr;
-    int offsets[CHUNK_SIZE];
-    int offsets_len;
-    
     struct list_head lst;
+    
+    char *func_name;
+    void *addr;     /* Start of the function. */
+    void *end_addr; /* Somewhere behind the start of the last insn. */
+    
+    /* Number of elements in idata[]. */
+    unsigned int num_idata;
+    
+    /* Information about the insns to handle in this function. */
+    struct insn_data idata[0];
 };
 
 struct sw_used
@@ -95,6 +172,7 @@ struct sw_used
     
     struct sw_available *func;
     void *addr;
+    void *detour_buf;
     unsigned int offset;
     int chosen;
     int set;
@@ -138,44 +216,10 @@ static LIST_HEAD(ranges_list); // addr_range
 static LIST_HEAD(used_list);   // sw_used
 static LIST_HEAD(active_list);
 
+static LIST_HEAD(return_addrs);
+
 static DEFINE_SPINLOCK(sw_lock);
 /* ====================================================================== */
-
-/* The maximum size of the memory area to check with repeated reads. */
-#define RH_MAX_REP_READ_SIZE sizeof(unsigned long)
-/* ====================================================================== */
-
-#define ADDR_TIMER_INTERVAL (HZ * 1) /* randomize breakpoints each second */
-
-static int random_breakpoints_count = 5;
-module_param(random_breakpoints_count, int, S_IRUGO);
-
-/* How long to wait with a HW BP armed (in milliseconds). The HW BP will be 
- * set for this period of time to detect accesses to the given memory area.
- */
-static unsigned long delay = 80;
-module_param(delay, ulong, S_IRUGO);
-/* ====================================================================== */
-
-/* A special value of the offset that means "all suitable offsets". */
-#define RH_ALL_OFFSETS ((unsigned int)(-1))
-
-/* Offset of the insn in the target function to set the sw bp to. */
-static unsigned int bp_offset = RH_ALL_OFFSETS;
-module_param(bp_offset, int, S_IRUGO);
-
-// TODO: Make this a parameter of the module too?
-#define BP_TIMER_INTERVAL (HZ / 10)
-
-/* Executes each BP_TIMER_INTERVAL jiffies (or more), resets the sw bp if 
- * needed. */
-static void work_fn_set_soft_bp(struct work_struct *work);
-static DECLARE_DELAYED_WORK(bp_work, work_fn_set_soft_bp);
-
-static void addr_work_fn(struct work_struct *work);
-static DECLARE_DELAYED_WORK(addr_work, addr_work_fn);
-
-static u8 soft_bp = 0xcc;
 
 /* It would be nice to get it some other way rather than look up by name. 
  * But that seems impossible unless this code is included into the kernel
@@ -186,6 +230,9 @@ static void * (*do_text_poke)(void *addr, const void *opcode, size_t len) =
 
 static int (*do_arch_install_hw_bp)(struct perf_event *bp) = NULL;
 static int (*do_arch_uninstall_hw_bp)(struct perf_event *bp) = NULL;
+
+static void * (*do_module_alloc)(unsigned long) = NULL;
+static void (*do_module_free)(struct module *, void *) = NULL;
 /* ====================================================================== */
 
 static struct hw_bp {
@@ -333,12 +380,6 @@ hw_bp_set_impl(struct hw_bp *bp)
     info->address = bp->addr;
     info->len = bp->len;
     info->type = bp->type;
-    
-    //<>
-    /* pr_info("[DBG] "
-       "Installing HW BP on CPU %d for address %p and length code %d.\n", 
-        cpu, (void *)bp->addr, bp->len); */
-    //<>
     
     ret = do_arch_install_hw_bp(pevent[0]);
     if (ret != 0) {
@@ -534,10 +575,6 @@ hw_bp_clear_impl(struct hw_bp *bp)
     }
     pevent[0]->attr.disabled = 1;
     --bp->usage_count;
-    
-    //<>
-    //pr_info("[DBG] Uninstalled HW BP on CPU %d.\n", cpu);
-    //<>
     return;
 }
 
@@ -736,12 +773,75 @@ fail:
     return ret;
 }
 
-
 static void racehound_add_breakpoint(struct sw_used *);
 static void racehound_sync_ranges_with_pool(void);
 
+/* Set all active software BPs if they are not set already.
+ * Must be called with ptext_mutex and sw_lock locked. */
+static void 
+sw_bp_set(void)
+{
+    struct sw_used *bp;
+    
+    /* Currently, it may be unsafe to track the execution of the target 
+     * while it performs its initialization. To be exact, it may be unsafe
+     * to use kallsyms to resolve the names of the symbols (directly or 
+     * indirectly via %pS in printk(), via dump_stack(), etc.) concurrently
+     * with the operations the module loader performs right after the 
+     * init function of the target returns. In some kernel versions, the 
+     * loader evicted the init-only symbols from the symbol tables at that
+     * point and accessing the symbol tables for the target module resulted
+     * in a race with unpredictable consequences, including occasional 
+     * crashes.
+     * For the present, we do not set the software BPs if the target's 
+     * initialization is still in progress. The delayed work to set the BP
+     * is scheduled as usual, however, so the breakpoint should be set 
+     * eventually. 
+     * 
+     * [NB] module_init is set to NULL by the loader last and the locks act 
+     * as memory barriers among other things, so it seems reasonable to 
+     * check module_init here.
+     * 
+     * TODO: find a way to get around this limitation because it makes it 
+     * impossible to track the initialization of the target where the races
+     * are also quite likely. Either prove that this symbol table race is
+     * no longer possible in the kernels RaceHound supports, or implement
+     * symbol resolution without kallsyms, or output just the sections and
+     * the offsets there and resolve the symbols in user space, or ... */
+    if (target_module && target_module->module_init) {
+        /* pr_warning("[rh] "
+        "Attempt to set a software breakpoint before the initialization "
+        "of the target is complete. Skipping.\n"); */
+        schedule_delayed_work(&bp_work, BP_TIMER_INTERVAL);
+        return;
+    }
+    
+    list_for_each_entry(bp, &active_list, a_lst) 
+    {
+        if (!bp->set)
+        {
+            do_text_poke(bp->addr, &soft_bp, 1);
+            bp->set = 1;
+        }
+    }
+}
+
+static void 
+sw_bp_work_fn(struct work_struct *work)
+{
+    unsigned long flags;
+    
+    mutex_lock(ptext_mutex);
+    spin_lock_irqsave(&sw_lock, flags);
+    
+    sw_bp_set();
+    
+    spin_unlock_irqrestore(&sw_lock, flags);
+    mutex_unlock(ptext_mutex);
+}
+
 static void
-addr_work_fn(struct work_struct *work)
+do_update_bps(void)
 {
     struct sw_used *bpused = NULL;
     struct sw_used *bpactive = NULL, *n = NULL;
@@ -751,15 +851,13 @@ addr_work_fn(struct work_struct *work)
     int gen = 1;
     unsigned int random_bp_number;
     unsigned long flags;
-    
-    //pr_info("[DBG] addr_work_fn started\n");
 
     mutex_lock(ptext_mutex);
     spin_lock_irqsave(&sw_lock, flags);
 
     list_for_each_entry_safe(bpactive, n, &active_list, a_lst) 
     {
-        if (bpactive->addr != NULL && bpactive->set) 
+        if (bpactive->set) 
         {
             do_text_poke(bpactive->addr, &(bpactive->orig_byte), 1);
             bpactive->set = 0;
@@ -775,7 +873,7 @@ addr_work_fn(struct work_struct *work)
         pool_length++;
     }
 
-    if (count >= pool_length)
+    if (count >= pool_length || bp_update_interval == 0)
     {
         /* We are behind the limit, so all the BPs from 'used_list' can be 
          * set. No need to use randomization, etc. */
@@ -805,9 +903,7 @@ addr_work_fn(struct work_struct *work)
                         racehound_add_breakpoint(bpused);
                         bpused->chosen = 1;
                     }
-                    else {
-                        break;
-                    }
+                    break;
                 }
                 j++;
             }
@@ -816,12 +912,18 @@ addr_work_fn(struct work_struct *work)
     }
 
 out:
+    sw_bp_set();
     spin_unlock_irqrestore(&sw_lock, flags);
     mutex_unlock(ptext_mutex);
+}
 
-    schedule_delayed_work(&bp_work, 0);
-    schedule_delayed_work(&addr_work, ADDR_TIMER_INTERVAL);
-    //pr_info("[DBG] addr_work_fn finished\n");
+static void
+addr_work_fn(struct work_struct *work)
+{
+    do_update_bps();
+
+    if (bp_update_interval != 0)
+        schedule_delayed_work(&addr_work, HZ * bp_update_interval);
 }
 
 /* [NB] Must be called under sw_lock. */
@@ -910,9 +1012,12 @@ out:
     spin_unlock_irqrestore(&sw_lock, flags);
 }
 
-static void add_used_breakpoint(struct sw_available *func, int index)
+static void 
+add_used_breakpoint(struct sw_available *func, int index)
 {
     struct sw_used *bpused;
+    
+    BUG_ON(detour_area == NULL);
     
     bpused = kzalloc(sizeof(*bpused), GFP_ATOMIC);
     if (bpused == NULL) {
@@ -923,8 +1028,10 @@ static void add_used_breakpoint(struct sw_available *func, int index)
     kref_init(&bpused->kref);
     
     bpused->func = func;
-    bpused->offset = func->offsets[index];
+    bpused->offset = func->idata[index].offset_in_func;
     bpused->addr = (u8 *)func->addr + bpused->offset;
+    bpused->detour_buf = 
+        (u8 *)detour_area + func->idata[index].offset_in_detour;
 
     list_add_tail(&bpused->u_lst, &used_list);
 }
@@ -967,15 +1074,15 @@ static void racehound_sync_ranges_with_pool(void)
 
         if (bprange->offset != RH_ALL_OFFSETS)
         {
-            for (i = 0; i < func->offsets_len; i++)
+            for (i = 0; i < func->num_idata; i++)
             {
-                if (func->offsets[i] == bprange->offset)
+                if (func->idata[i].offset_in_func == bprange->offset)
                 {
                     add_used_breakpoint(func, i);
                     break;
                 }
             }
-            if (i == func->offsets_len)
+            if (i == func->num_idata)
             {
                 pr_warning("[rh] "
                     "Warning: offset %x in function %s not found.\n", 
@@ -984,7 +1091,7 @@ static void racehound_sync_ranges_with_pool(void)
         }
         else
         {
-            for (i = 0; i < func->offsets_len; i++)
+            for (i = 0; i < func->num_idata; i++)
             {
                 add_used_breakpoint(func, i);
             }
@@ -1010,44 +1117,17 @@ static void racehound_add_breakpoint(struct sw_used *swbp)
     kref_get(&swbp->kref);
     list_add_tail(&swbp->a_lst, &active_list);
 }
+/* ====================================================================== */
 
-static int process_insn(struct insn* insn, void* params)
+/* Returns non-zero if the instruction could be processed by RaceHound
+ * (used as a target of a software BP and so forth), 0 otherwise.
+ * The insn must be decoded before calling this function. */
+static int 
+should_process_insn(struct insn *insn)
 {
-    int i;
-    short nulls = 1;
-    struct sw_available *func = (struct sw_available *) params;
-    for (i = 0; i < insn->length; i++)
-    {
-        if (*(i + (unsigned char *) insn->kaddr) != 0)
-        {
-            nulls = 0;
-        }
-    }
-
-    if (nulls != 1)
-    {
-        
-        if ( (insn_is_mem_read(insn) || insn_is_mem_write(insn)) 
-          && is_tracked_memory_op(insn) 
-          && !insn_has_fs_gs_prefixes(insn))
-        {
-            if (func->offsets_len < CHUNK_SIZE)
-            {
-                func->offsets[func->offsets_len] = 
-                    (unsigned long) insn->kaddr - (unsigned long) func->addr;
-                func->offsets_len++;
-            }
-            else
-            {
-                return 1;
-            }
-        }
-        return 0;
-    }
-    else
-    {
-        return -1;
-    }
+    return ((insn_is_mem_read(insn) || insn_is_mem_write(insn)) &&
+            is_tracked_memory_op(insn) &&
+            !insn_has_fs_gs_prefixes(insn));
 }
 /* ====================================================================== */
 
@@ -1249,8 +1329,7 @@ decode_and_get_addr(void *insn_addr, struct pt_regs *regs,
     kernel_insn_init(&insn, insn_addr);
     insn_get_length(&insn);
     
-    if ((!insn_is_mem_read(&insn) && !insn_is_mem_write(&insn)) || 
-        !is_tracked_memory_op(&insn))
+    if (!should_process_insn(&insn))
         return NULL;
         
     insn_get_length(&insn);
@@ -1291,180 +1370,325 @@ decode_and_get_addr(void *insn_addr, struct pt_regs *regs,
     WARN_ON_ONCE(1);
     return NULL;
 }
+/* ====================================================================== */
 
-static void work_fn_set_soft_bp(struct work_struct *work)
+struct func_data {
+    unsigned int num_insns;
+    unsigned int sz_buf;
+};
+
+static int
+get_insn_info(struct insn *insn, void *data)
 {
-    unsigned long flags;
-    struct sw_used *bp;
-    /*pr_info("[DBG] set_soft_bp work started\n");*/
+    struct func_data *fdata = data;
+    /* kedr_for_each_insn() makes sure the insn is decoded by now. */
     
-    mutex_lock(ptext_mutex);
-    spin_lock_irqsave(&sw_lock, flags);
-    
-    /* Currently, it may be unsafe to track the execution of the target 
-     * while it performs its initialization. To be exact, it may be unsafe
-     * to use kallsyms to resolve the names of the symbols (directly or 
-     * indirectly via %pS in printk(), via dump_stack(), etc.) concurrently
-     * with the operations the module loader performs right after the 
-     * init function of the target returns. In some kernel versions, the 
-     * loader evicted the init-only symbols from the symbol tables at that
-     * point and accessing the symbol tables for the target module resulted
-     * in a race with unpredictable consequences, including occasional 
-     * crashes.
-     * For the present, we do not set the software BPs if the target's 
-     * initialization is still in progress. The delayed work to set the BP
-     * is scheduled as usual, however, so the breakpoint should be set 
-     * eventually. 
-     * 
-     * [NB] module_init is set to NULL by the loader last and the locks act 
-     * as memory barriers among other things, so it seems reasonable to 
-     * check module_init here.
-     * 
-     * TODO: find a way to get around this limitation because it makes it 
-     * impossible to track the initialization of the target where the races
-     * are also quite likely. Either prove that this symbol table race is
-     * no longer possible in the kernels RaceHound supports, or implement
-     * symbol resolution without kallsyms, or output just the sections and
-     * the offsets there and resolve the symbols in user space, or ... */
-    if (target_module && target_module->module_init) {
-        /* pr_warning("[rh] "
-        "Attempt to set a software breakpoint before the initialization "
-        "of the target is complete. Skipping.\n"); */
-        goto out;
+    if (should_process_insn(insn)) {
+        ++fdata->num_insns;
+        fdata->sz_buf += insn->length + RH_JMP_LEN;
     }
-    
-    list_for_each_entry(bp, &active_list, a_lst) 
-    {
-        if (!bp->set)
-        {
-            /*pr_info("[DBG] setting breakpoint to %p (%s+0x%x)\n", 
-                    bp->addr, bp->func_name, bp->offset);*/
-            do_text_poke(bp->addr, &soft_bp, 1);
-            bp->set = 1;
-        }
-    }
-    
-out:
-    spin_unlock_irqrestore(&sw_lock, flags);
-    mutex_unlock(ptext_mutex);
-    /*pr_info("[DBG] set_soft_bp work finished\n");*/
-    
-    if (target_module)
-    {
-        schedule_delayed_work(&bp_work, BP_TIMER_INTERVAL);
-    }
+    return 0;
 }
 
-static void detach_from_target(void)
+struct process_insn_data {
+    struct sw_available *func;
+    unsigned int index;
+    unsigned int dbuf_offset;
+};
+
+static int
+process_insn(struct insn *insn, void *data)
+{
+    struct process_insn_data *pdata = data;
+    struct insn_data *insn_data;
+    void *dbuf;
+    u8 *p;
+    u32 *pdisp;
+    u32 disp;
+    
+    if (!should_process_insn(insn))
+        return 0;
+    
+    BUG_ON(pdata->index >= pdata->func->num_idata);
+    insn_data = &pdata->func->idata[pdata->index];
+    
+    insn_data->offset_in_func = 
+        (unsigned int)((unsigned long)insn->kaddr - 
+                       (unsigned long)pdata->func->addr);
+    insn_data->offset_in_detour = pdata->dbuf_offset;
+    
+    /* Copy the insn to the detour buffer, relocate if necessary,
+     * add the jump to the next insn. */
+    dbuf = (void *)((u8 *)detour_area + insn_data->offset_in_detour);
+    
+    /*pr_info("[DBG] insn at %s+0x%x, detour buffer at %p.\n", 
+        pdata->func->func_name, insn_data->offset_in_func, dbuf);*/
+    
+    memcpy(dbuf, insn->kaddr, insn->length);
+
+#ifdef CONFIG_X86_64
+    if (insn_rip_relative(insn)) {
+        disp = (u32)(
+            (unsigned long)insn->kaddr + 
+            X86_SIGN_EXTEND_V32(insn->displacement.value) -
+            (unsigned long)dbuf);
+        
+        pdisp = (u32 *)(
+            (unsigned long)dbuf + insn_offset_displacement(insn));
+        *pdisp = disp;
+    }
+#endif
+
+    p = (u8 *)dbuf + insn->length;
+    *p = 0xe9; /* opcode of JMP near indirect on x86 */
+    
+    pdisp = (u32 *)(p + 1);
+    disp = (u32)((unsigned long)insn->kaddr + insn->length - 
+                 ((unsigned long)p + RH_JMP_LEN));
+    *pdisp = disp;
+   
+    /*{
+        unsigned int i;
+        pr_info("[DBG] Contents of detour buffer: ");
+        for (i = 0; i < (unsigned int)insn->length + RH_JMP_LEN; ++i) {
+            pr_info("0x%02x ", *((u8 *)dbuf + i));
+        }
+        pr_info("\n");
+    }*/
+   
+    ++pdata->index;
+    pdata->dbuf_offset += insn->length + RH_JMP_LEN;
+    return 0;
+}
+
+static void
+destroy_available_list(void)
 {
     struct sw_available *av_pos;
     struct sw_available *av_tmp;
+        
+    list_for_each_entry_safe(av_pos, av_tmp, &available_list, lst) {
+        list_del(&av_pos->lst);
+        kfree(av_pos->func_name);
+        kfree(av_pos);
+    }
+    
+    if (detour_area != NULL) {
+        do_module_free(NULL, detour_area);
+        detour_area = NULL;
+    }
+}
+
+static int
+create_available_list(struct list_head *funcs)
+{
+    struct kedr_tmod_function *pos;
+    struct sw_available *func;
+    int ret = 0;
+           
+    struct func_data data = {
+        .num_insns = 0,
+        .sz_buf = 0
+    };
+    
+    struct process_insn_data pdata = {
+        .dbuf_offset = 0
+    };
+        
+    /* The first pass:
+     * - determine the number of insns to process in each function;
+     * - allocate sw_available struct for each function, populate it 
+     *   partially and add it to the list; 
+     * - calculate the size of the detour area for all functions. */
+    list_for_each_entry(pos, funcs, list) {
+        u8 *start = pos->addr;
+        u8 *end = start + (unsigned long)pos->text_size;
+        
+        /* Cut off the trailing 0s: they cannot be the first bytes of 
+         * an insn of interest. */
+        --end;
+        while (end >= start && *end == 0)
+            --end;
+        ++end;
+        
+        if (start == end)
+            continue;
+        
+        data.num_insns = 0;
+        kedr_for_each_insn((unsigned long)start, (unsigned long)end, 
+                           get_insn_info, &data);
+        
+        if (data.num_insns == 0)
+            continue;
+        
+        func = kzalloc(sizeof(struct sw_available) + data.num_insns * 
+                       sizeof(struct insn_data), 
+                       GFP_KERNEL);
+        if (func == NULL) {
+            pr_warning(
+                "[rh] Not enough memory to create structs for %s.\n",
+                pos->name);
+            continue;
+        }
+               
+        func->func_name = kstrdup(pos->name, GFP_KERNEL);
+        if (func->func_name == NULL) {
+             pr_warning(
+                "[rh] Not enough memory to create structs for %s.\n",
+                pos->name);
+            kfree(func);
+            continue;
+        }
+        
+        func->num_idata = data.num_insns;
+        func->addr = pos->addr;
+        func->end_addr = end;
+        
+        list_add_tail(&func->lst, &available_list);
+    }
+    
+    if (data.sz_buf == 0) {
+        /* Nothing to process at all. */
+        return 0;
+    }
+    
+    /* Allocate the detour area. */
+    detour_area = do_module_alloc(data.sz_buf);
+    if (detour_area == NULL) {
+        pr_warning("[rh] Failed to allocate detour area of %u byte(s).\n",
+            data.sz_buf);
+        goto fail;
+    }
+    pr_info("[rh] Allocated detour area of %u byte(s).\n", data.sz_buf);
+    
+    /* The second pass: for each sw_available struct, set the offset and
+     * the address of the detour buffer for each instruction of interest, 
+     * copy the insn to that buffer, relocate it if needed and write a jump 
+     * to the next instruction. */
+    list_for_each_entry(func, &available_list, lst) {
+        pdata.func = func;
+        pdata.index = 0;
+        
+        kedr_for_each_insn(
+            (unsigned long)func->addr, (unsigned long)func->end_addr,
+            process_insn, &pdata);
+    }
+    return 0;
+    
+fail:
+    destroy_available_list();
+    return ret;
+}
+/* ====================================================================== */
+
+static void 
+detach_from_target(void)
+{
     struct sw_used *used_pos;
     struct sw_used *used_tmp;
     
-    cancel_delayed_work_sync(&bp_work);
     cancel_delayed_work_sync(&addr_work);
+    cancel_delayed_work_sync(&bp_work);
 
+    // TODO: use module_mutex to synchronize with loading/unloading of the
+    // target properly and to serialize accessed to 'target_module'?
     if (target_module)
     {
+        unsigned long flags;
+        
+        mutex_lock(ptext_mutex);
+        spin_lock_irqsave(&sw_lock, flags);
+        
+        /* Clear active_list and clear the remaining SW BPs. */
+        list_for_each_entry_safe(used_pos, used_tmp, &active_list, a_lst) {
+            if (used_pos->set) 
+            {
+                do_text_poke(used_pos->addr, &(used_pos->orig_byte), 1);
+                used_pos->set = 0;
+            }
+            list_del(&used_pos->a_lst);
+            kref_put(&used_pos->kref, sw_used_del);
+        }
+        spin_unlock_irqrestore(&sw_lock, flags);
+        mutex_unlock(ptext_mutex);
+        
+        /* Wait till the processing of the SW BPs has finished. 
+         * TODO: Find a more reliable way rather than a hard-coded delay. */
+        msleep(500);
+        
+        /* If there is something in 'return_addrs' list, SW BP handling is
+         * still in progress. */
+        BUG_ON(!list_empty(&return_addrs));
+        
         cleanup_hw_breakpoints();
         target_module = NULL;
     }
     
-    /* Clear active_list. */
-    list_for_each_entry_safe(used_pos, used_tmp, &active_list, a_lst) {
-        list_del(&used_pos->a_lst);
-        kref_put(&used_pos->kref, sw_used_del);
-    }
-    
-    /* Clear used_list and available_list and destroy their items. */
+    /* Clear used_list and destroy its items. */
     list_for_each_entry_safe(used_pos, used_tmp, &used_list, u_lst) {
         list_del(&used_pos->u_lst);
         if (!kref_put(&used_pos->kref, sw_used_del)) {
             pr_warning("[DBG] An sw_used structure is still in use.\n");
         }
     }
-    
-    list_for_each_entry_safe(av_pos, av_tmp, &available_list, lst) {
-        list_del(&av_pos->lst);
-        kfree(av_pos->func_name);
-        kfree(av_pos);
-    }
+
+    destroy_available_list();
 }
 
 static int 
 rhound_detector_notifier_call(struct notifier_block *nb,
     unsigned long mod_state, void *vmod)
 {
-    struct kedr_tmod_function *pos;
-    struct sw_available *func;
     struct module* mod = (struct module *)vmod;
     unsigned long flags;
+    int ret = 0;
     
     BUG_ON(mod == NULL);
     
     switch(mod_state)
     {
     case MODULE_STATE_COMING:
-        if((target_name != NULL)
-            && (strcmp(target_name, module_name(mod)) == 0))
-        {
-            int ret = 0;
-            target_module = mod;
-            pr_info("[rh] "
-                "Target loaded: %s, module_core=%lx, core_size=%d\n", 
-                module_name(mod),
-                (unsigned long)mod->module_core, mod->core_size);
-            
-            kedr_print_section_info(target_name);
-            ret = kedr_load_function_list(mod);
-            if (ret) {
-                pr_warning("[rh] "
-        "Error occured while processing functions in \"%s\". Code: %d\n",
-                    module_name(mod), ret);
-                goto cleanup_func_and_fail;
-            }
-                            
-            list_for_each_entry(pos, &tmod_funcs, list) {
-                func = kzalloc(sizeof(*func), GFP_KERNEL);
-                if (func == NULL) {
-                    pr_warning(
-                    "[rh] rhound_detector_notifier_call: out of memory.\n");
-                    continue;
-                }
-                
-                func->func_name = kstrdup(pos->name, GFP_KERNEL);
-                if (func->func_name == NULL) {
-                    pr_warning(
-                    "[rh] rhound_detector_notifier_call: out of memory.\n");
-                    kfree(func);
-                    continue;
-                }
-                
-                func->addr = pos->addr;
-                func->offsets_len = 0;
-                INIT_LIST_HEAD(&(func->lst));    
-                
-                kedr_for_each_insn((unsigned long) pos->addr, 
-                                    (unsigned long) pos->addr + (unsigned long) pos->text_size, 
-                                    &process_insn, func);
-                list_add_tail(&func->lst, &available_list);
-            }
-            
-            ret = init_hw_breakpoints();
-            if (ret != 0) {
-                pr_warning("[rh] "
-            "Failed to initialize breakpoint handling facilities.\n");
-                goto cleanup_func_and_fail;
-            }
-            
-            spin_lock_irqsave(&sw_lock, flags);
-            racehound_sync_ranges_with_pool();
-            spin_unlock_irqrestore(&sw_lock, flags);
-            smp_wmb(); // TODO: what for?
-            schedule_delayed_work(&addr_work, 0);
-            schedule_delayed_work(&bp_work, 0);
+        if (target_name == NULL || 
+            strcmp(target_name, module_name(mod)) != 0) {
+            break;
         }
+
+        target_module = mod;
+        pr_info("[rh] "
+            "Target loaded: %s, module_core=%lx, core_size=%d\n", 
+            module_name(mod),
+            (unsigned long)mod->module_core, mod->core_size);
+        
+        kedr_print_section_info(target_name);
+        ret = kedr_load_function_list(mod);
+        if (ret) {
+            pr_warning("[rh] "
+    "Error occured while processing functions in \"%s\". Code: %d\n",
+                module_name(mod), ret);
+            goto out;
+        }
+        
+        ret = create_available_list(&tmod_funcs);
+        if (ret)
+            goto out;
+        
+        ret = init_hw_breakpoints();
+        if (ret != 0) {
+            pr_warning("[rh] "
+        "Failed to initialize breakpoint handling facilities.\n");
+            goto out_avail;
+        }
+        
+        spin_lock_irqsave(&sw_lock, flags);
+        racehound_sync_ranges_with_pool();
+        spin_unlock_irqrestore(&sw_lock, flags);
+        
+        smp_wmb(); // TODO: what for?
+        
+        schedule_delayed_work(&addr_work, 0);
+                
+        /* The info about the functions is no longer needed. */
+        kedr_cleanup_function_subsystem(); 
         break;
     
     case MODULE_STATE_GOING:
@@ -1479,9 +1703,16 @@ rhound_detector_notifier_call(struct notifier_block *nb,
                 atomic_read(&race_counter));
         }
         break;
+    
+    default: 
+        break;
     }
-    cleanup_func_and_fail: 
-        kedr_cleanup_function_subsystem();
+    return 0;
+
+out_avail:
+    destroy_available_list();
+out:
+    kedr_cleanup_function_subsystem();
     return 0;
 }
 
@@ -1492,8 +1723,6 @@ static struct notifier_block detector_nb = {
 };
 
 void handler_wrapper(void);
-
-static LIST_HEAD(return_addrs);
 
 static short can_sleep(void)
 {
@@ -1525,7 +1754,7 @@ rhound_real_handler(void)
         }
     }
     BUG_ON(&addr->lst == &return_addrs);
-    ea = decode_and_get_addr((void *)addr->return_addr, &addr->regs, &size);
+    ea = decode_and_get_addr(addr->swbp->detour_buf, &addr->regs, &size);
     spin_unlock_irqrestore(&sw_lock, sw_flags);
     
     if (ea == NULL || size == 0) {
@@ -1632,7 +1861,10 @@ on_soft_bp_triggered(struct die_args *args)
         }
         BUG_ON(&addr->lst == &return_addrs);
         memcpy(args->regs, &addr->regs, sizeof(addr->regs));
-        args->regs->ip -= 1;
+        
+        /* Make sure the execution resumes in the appropriate detour
+         * buffer. */
+        args->regs->ip = (unsigned long)addr->swbp->detour_buf;
         list_del(&addr->lst);
         
         /* OK, 'addr' struct no longer needs the sw_used instance. */
@@ -1651,7 +1883,7 @@ on_soft_bp_triggered(struct die_args *args)
         }
     }
 
-    if (&swbp->a_lst != &active_list) // Found
+    if (&swbp->a_lst != &active_list) /* Found */
     {
         ret = NOTIFY_STOP; /* our breakpoint, we will handle it */
         
@@ -1661,35 +1893,27 @@ on_soft_bp_triggered(struct die_args *args)
         swbp->cpu = raw_smp_processor_id();
         swbp->task = current;
 
-        //<>
-        /*pr_info( 
-            "[Begin] Our software bp at %p; CPU=%d, task_struct=%p\n", 
-            swbp->addr, smp_processor_id(), current);*/
-        //<>
-
-        /* Another ugly thing. We should lock text_mutex but we cannot do
-         * this in atomic context... */
-        do_text_poke(swbp->addr, &swbp->orig_byte, 1);
+        /* Note that we do not remove the breakpoint because after the 
+         * handlers finish, the instruction will be executed in its 
+         * detour buffer rather than at the original location. */
 
         addr = kzalloc(sizeof(*addr), GFP_ATOMIC);
-        addr->return_addr = (void *) args->regs->ip - 1;
-        addr->pcurrent = current;
-        addr->swbp = swbp;
-        memcpy(&addr->regs, args->regs, sizeof(addr->regs));
-        list_add_tail(&addr->lst, &return_addrs);
-
-        args->regs->ip = (unsigned long) &handler_wrapper;
-        swbp->set = 0;
-
-        //<>
-        /*pr_info( 
-            "[End] Our software bp at %p; CPU=%d, task_struct=%p\n", 
-            swbp->addr, smp_processor_id(), current);*/
-        //<>
+        if (addr != NULL) {
+            addr->return_addr = (void *) args->regs->ip - 1;
+            addr->pcurrent = current;
+            addr->swbp = swbp;
+            
+            memcpy(&addr->regs, args->regs, sizeof(addr->regs));
+            args->regs->ip = (unsigned long)&handler_wrapper;
+            
+            list_add_tail(&addr->lst, &return_addrs);
+        }
+        else {
+            pr_warning("[rh] on_soft_bp_triggered: out of memory.\n");
+        }
     }
 
     spin_unlock_irqrestore(&sw_lock, sw_flags);
-    
     return ret;
 }
 
@@ -1900,7 +2124,7 @@ static ssize_t bp_file_write(struct file *filp, const char __user *buf,
             {
                 sscanf(offset, "%x", &offset_val);
             }
-            /*printk("func_name: %s offset_val: %x\n", func_name, offset_val);*/
+
             if (remove)
             {
                 racehound_remove_breakpoint_range(func_name, offset_val);
@@ -1910,7 +2134,9 @@ static ssize_t bp_file_write(struct file *filp, const char __user *buf,
                 racehound_add_breakpoint_range(func_name, offset_val);
             }
             found = 1;
-            /*printk("add/remove complete\n");*/
+            
+            /* Update the breakpoints. */
+            do_update_bps();
         }
     }
     
@@ -1948,9 +2174,6 @@ find_kernel_api(void)
         return -EINVAL;
     }
     
-    /*pr_info("[DBG] &text_mutex = %p, &text_poke = %p\n",
-        ptext_mutex, do_text_poke);*/
-    
     do_arch_install_hw_bp = (void *)kallsyms_lookup_name(
         "arch_install_hw_breakpoint");
     if (do_arch_install_hw_bp == NULL) {
@@ -1965,12 +2188,17 @@ find_kernel_api(void)
         return -EINVAL;
     }
     
-    /*pr_info("[DBG] &arch_install_hw_breakpoint: %p\n", 
-        do_arch_install_hw_bp);*/
+    do_module_alloc = (void *)kallsyms_lookup_name("module_alloc");
+    if (do_module_alloc == NULL) {
+        pr_warning("Not found: module_alloc\n");
+        return -EINVAL;
+    }
     
-    /*pr_info("[DBG] &arch_uninstall_hw_breakpoint: %p\n", 
-        do_arch_uninstall_hw_bp);*/
-    
+    do_module_free = (void *)kallsyms_lookup_name("module_free");
+    if (do_module_free == NULL) {
+        pr_warning("Not found: module_free\n");
+        return -EINVAL;
+    }
     return 0;
 }
 
@@ -1979,33 +2207,31 @@ racehound_module_init(void)
 {
     int ret = 0;
     
-    /*init_timer(&addr_timer);
-    addr_timer.function = addr_timer_fn;
-    addr_timer.data = 0;
-    addr_timer.expires = 0;*/
-    
+    INIT_LIST_HEAD(&available_list);
     INIT_LIST_HEAD(&active_list);
     INIT_LIST_HEAD(&used_list);
     INIT_LIST_HEAD(&ranges_list);
 
     INIT_LIST_HEAD(&return_addrs);
-
-    INIT_LIST_HEAD(&available_list);
     
+    if (delay == 0)
+        delay = jiffies_to_msecs(5);
+
     ret = find_kernel_api();
     if (ret != 0) {
         pr_warning("[rh] Failed to find the needed kernel API.\n");
         return ret;
     }
     
+    // TODO: It might be possible to attach to an already loaded module too.
+    // find_module() (with module_mutex locked) should help.
+    // Besides, we should provide better synchronization w.r.t. target 
+    // loading and unloading as well as the accesses to target_module.
+    
     ret = register_die_notifier(&die_nb);
     if (ret != 0)
             return ret;
     
-    //<>
-    //wq = create_singlethread_workqueue("rhound");
-    //<>
-
     debugfs_dir_dentry = debugfs_create_dir(debugfs_dir_name, NULL);
     if (IS_ERR(debugfs_dir_dentry)) {
         pr_err("[rh] debugfs is not supported\n");
