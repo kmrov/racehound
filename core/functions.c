@@ -240,14 +240,14 @@ kedr_load_function_list(struct module *target_module)
 	kfree(pfuncs);
 	
 	//<>
-	list_for_each_entry(pos, &tmod_funcs, list) {
+	/*list_for_each_entry(pos, &tmod_funcs, list) {
 		printk(KERN_INFO "[sample] "
 	"module: \"%s\", function \"%s\": address is %p, size is %lu\n",
 			module_name(target_module),
 			pos->name,
 			pos->addr,
 			(unsigned long)pos->text_size);
-	}
+	}*/
 	//<>
 	return 0;
 }

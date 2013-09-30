@@ -1,0 +1,98 @@
+#!/bin/sh
+
+core_module="@CMAKE_BINARY_DIR@/core/race_hound.ko"
+
+target_name="@module_name_atomic@"
+target_module="@CMAKE_CURRENT_BINARY_DIR@/${target_name}.ko"
+
+target_function="hello_plus"
+# TODO: Need to be configured somehow
+bp_offset="0x11"
+
+insmod_command=`PATH=$PATH:/sbin which insmod`
+rmmod_command=`PATH=$PATH:/sbin which rmmod`
+
+# Need debugfs for read counter of races found
+TMP_DIR="@RH_TEST_PREFIX_TEMP@/test"
+DEBUGFS_DIR="${TMP_DIR}/debug"
+
+if ! mkdir -p "$DEBUGFS_DIR"; then
+    printf "Failed to create directory %s for mount debugfs\n" "$DEBUGFS_DIR"
+    exit 1
+fi
+
+if ! mount -t debugfs none "$DEBUGFS_DIR"; then
+    printf "Failed to mount debugfs to %s\n" "$DEBUGFS_DIR"
+    exit 1
+fi
+
+# Prepare to test
+if ! ${insmod_command} ${core_module} target_name=${target_name} \
+        rh_get_sections_path="@CMAKE_BINARY_DIR@/core/um_helpers/rh_test_get_sections.sh"; then
+    printf "Failed to load core module into kernel.\n"
+    umount "$DEBUGFS_DIR"
+    exit 1
+fi
+
+if ! ${insmod_command} ${target_module}; then
+    printf "Failed to load target module into kernel.\n"
+    ${rmmod_command} ${core_module}
+    umount "$DEBUGFS_DIR"
+    exit 1
+fi
+
+if test $1 = "--offset"; then
+    echo "${target_function}+${bp_offset}" > $DEBUGFS_DIR/rhound/breakpoints
+elif test $1 = "--function"; then
+    echo "${target_function}+*" > $DEBUGFS_DIR/rhound/breakpoints
+else
+    echo "${target_function}+${bp_offset}" > $DEBUGFS_DIR/rhound/breakpoints
+fi
+
+# Test itself.
+# 
+# To repeated operations run concurrently: one in backgroud and one in
+# the current thread.
+sh @CMAKE_CURRENT_SOURCE_DIR@/plus.sh&
+
+# Store pid for wait after test.
+plus_pid=$!
+
+sh @CMAKE_CURRENT_SOURCE_DIR@/minus.sh
+
+# Wait until background process is finished before finalize test
+wait ${plus_pid}
+
+if ! ${rmmod_command} ${target_module}; then
+    printf "Failed to unload target module.\n"
+    # Core module cannot be unloaded if target one is failed to unload.
+    umount "$DEBUGFS_DIR"
+    exit 1
+fi
+
+race_count=`cat "$DEBUGFS_DIR/rhound/race_count"`
+
+if test -z "$race_count"; then
+    printf "Failed to read counter of race found\n"
+    test_result=1
+elif test "$race_count" -eq "0"; then
+    printf "Races are not found\n"
+    test_result=1
+else
+    test_result=0
+fi
+
+if ! ${rmmod_command} ${core_module}; then
+    printf "Failed to unload core module.\n"
+    umount "$DEBUGFS_DIR"
+    exit 1
+fi
+
+if ! umount "$DEBUGFS_DIR"; then
+    printf "Failed to unmount debugfs directory after test\n"
+    exit 1
+fi
+
+exit ${test_result}
+
+
