@@ -1307,11 +1307,16 @@ get_addr_size_x_y(struct insn *insn, struct pt_regs *regs,
     /* Independent on REP* prefixes, DF and CX, the data item pointed to by 
      * esi/rsi for type X and edi/rdi for type Y will always be accessed by
      * the instruction. Let us track operations with that item at least. */
-    if (is_insn_type_x(insn))
-        return (void *)regs->si;
-    
     if (is_insn_type_y(insn))
         return (void *)regs->di;
+
+    if (is_insn_type_x(insn))
+        return (void *)regs->si;
+
+    /* For MOVS and CMPS, the second access (the access to 'destination' 
+     * area) will be tracked. That's easier because the decoder actually 
+     * reports the access type for that access rather than for the access 
+     * to the source area in this case. No need to adjust the access type.*/
     
     BUG();
     return NULL;
