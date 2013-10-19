@@ -1316,13 +1316,104 @@ get_addr_size_x_y(struct insn *insn, struct pt_regs *regs,
     BUG();
     return NULL;
 }
+
+static int
+is_cmovcc_access(struct insn *insn, unsigned long flags)
+{
+    /* Condition code, 'tttn' in the Intel's manual. */
+    unsigned char tttn = insn->opcode.bytes[1] & 0xf;
+    
+    /* Flags */
+    int cf = ((flags & (0x1UL << 0)) != 0);
+    int pf = ((flags & (0x1UL << 2)) != 0);
+    int zf = ((flags & (0x1UL << 6)) != 0);
+    int sf = ((flags & (0x1UL << 7)) != 0);
+    int of = ((flags & (0x1UL << 11)) != 0);
+    
+    switch (tttn) {
+    case 0x0: /* O */
+        if (of)
+            return 1;            
+        break;
+    case 0x1: /* NO */
+        if (!of)
+            return 1;
+        break;
+    case 0x2: /* B, NAE */
+        if (cf)
+            return 1;
+        break;
+    case 0x3: /* NB, AE */
+        if (!cf)
+            return 1;
+        break;
+    case 0x4: /* E, Z */
+        if (zf)
+            return 1;
+        break;
+    case 0x5: /* NE, NZ */
+        if (!zf)
+            return 1;
+        break;
+    case 0x6: /* BE, NA */
+        if (cf || zf)
+            return 1;
+        break;
+    case 0x7: /* NBE, A */
+        if (!cf && !zf)
+            return 1;
+        break;
+    case 0x8: /* S */
+        if (sf)
+            return 1;
+        break;
+    case 0x9: /* NS */
+        if (!sf)
+            return 1;
+        break;
+    case 0xa: /* P, PE */
+        if (pf)
+            return 1;
+        break;
+    case 0xb: /* NP, PO */
+        if (!pf)
+            return 1;
+        break;
+    case 0xc: /* L, NGE */
+        if (sf != of)
+            return 1;
+        break;
+    case 0xd: /* NL, GE */
+        if (sf == of)
+            return 1;
+        break;
+    case 0xe: /* LE, NG */
+        if (zf || sf != of)
+            return 1;
+        break;
+    case 0xf: /* NLE, G */
+        if (!zf && sf == of)
+            return 1;
+        break;
+    default:
+        break;
+    }
+    
+    return 0;
+}
 /* ====================================================================== */
 
 /* [NB] regs->ip is the IP of the instruction + 1 because the software 
- * breakpoint is a trap (IP points after 0xcc). */
+ * breakpoint is a trap (IP points after 0xcc). 
+ *
+ * The function returns NULL if the instruction does not access memory or
+ * should not be handled for some other reasons. This is not an error.
+ * 
+ * If *size is 0 after this function returns, however, there is an error:
+ * invalid instruction or something else. */
 static void *
 decode_and_get_addr(void *insn_addr, struct pt_regs *regs, 
-                    int *size /* Out */)
+                    int *size /* Out */, int *is_write /* Out */)
 {
     struct insn insn;
 
@@ -1331,14 +1422,40 @@ decode_and_get_addr(void *insn_addr, struct pt_regs *regs,
     
     if (!should_process_insn(&insn))
         return NULL;
-        
-    insn_get_length(&insn);
     
-    /* Common case: addressing types E and M: Mod R/M, SIB, etc. should be
-     * analyzed. */
-    if (is_insn_type_e(&insn) || is_insn_movbe(&insn) || 
-        is_insn_cmpxchg8b_16b(&insn))
+    if (is_write != NULL && insn_is_mem_write(&insn))
+        *is_write = 1;
+    
+    if (is_insn_movbe(&insn)) {
+        /* The decoder will always consider MOVBE as read because it has the
+         * same opcode as CRC insn, which only reads memory. Still, one kind
+         * of MOVBE (0F 38 F1) actually writes to memory, so we need to 
+         * handle that here. */
+        if (is_write != NULL && insn.opcode.bytes[2] == 0xf1)
+            *is_write = 1;
         return get_addr_size_common(&insn, regs, size);
+    }
+    
+    if (is_insn_cmpxchg(&insn) || is_insn_cmpxchg8b_16b(&insn)) {
+        /* For CMPXCHG*, read happens always, write - depending on the
+         * condition. For simplicity, we assume they only read memory. 
+         * In the future, handling of writes can be added if it is 
+         * necessary. */
+        if (is_write != NULL)
+            *is_write = 0;
+        return get_addr_size_common(&insn, regs, size);
+    }
+    
+    /* Common case: addressing type E: Mod R/M, SIB, etc. should be
+     * analyzed. */
+    if (is_insn_type_e(&insn)) {
+        /* CMOVcc accesses memory only if the condition is true. We check 
+         * here if the access is about to happen to avoid false positives.*/
+        if (is_insn_cmovcc(&insn) && !is_cmovcc_access(&insn, regs->flags))
+            return NULL;
+        
+        return get_addr_size_common(&insn, regs, size);
+    }
     
     if (is_insn_type_x(&insn) || is_insn_type_y(&insn))
         return get_addr_size_x_y(&insn, regs, size);
@@ -1740,6 +1857,8 @@ rhound_real_handler(void)
     void *ea;
     int size = 0;
     int ret = 0;
+    int is_write = 0;
+    int access_type;
     u8 data[RH_MAX_REP_READ_SIZE];
     size_t nbytes_to_check;
     
@@ -1754,10 +1873,14 @@ rhound_real_handler(void)
         }
     }
     BUG_ON(&addr->lst == &return_addrs);
-    ea = decode_and_get_addr(addr->swbp->detour_buf, &addr->regs, &size);
+    ea = decode_and_get_addr(addr->swbp->detour_buf, &addr->regs, &size,
+                             &is_write);
     spin_unlock_irqrestore(&sw_lock, sw_flags);
     
-    if (ea == NULL || size == 0) {
+    if (ea == NULL) /* No need to handle the insn, e.g. CMOVcc w/o access */
+        return;
+    
+    if (size == 0) {
         pr_info("[rh] "
 "Failed to obtain the address and size of the data accessed at %pS.\n",
             (void *)addr->return_addr);
@@ -1787,11 +1910,11 @@ rhound_real_handler(void)
         nbytes_to_check = (size_t)size;
     memcpy(&data[0], ea, nbytes_to_check);
     
-    /* TODO Choose the appropriate access type: X86_BREAKPOINT_WRITE or
-     * X86_BREAKPOINT_RW based on the insn. */
+    access_type = is_write ? X86_BREAKPOINT_RW : X86_BREAKPOINT_WRITE;
+    
     ret = hw_bp_set((unsigned long)ea,    /* start address of the area */
                     size,                 /* size */
-                    X86_BREAKPOINT_WRITE, /* access type */
+                    access_type,          /* detect writes only or r/w */
                     delay,
                     addr->swbp);
     if (ret >= 0) {

@@ -92,6 +92,18 @@ is_insn_cmpxchg8b_16b(struct insn *insn)
 }
 
 int
+is_insn_cmpxchg(struct insn *insn)
+{
+    u8 *opcode = insn->opcode.bytes;
+    u8 modrm = insn->modrm.bytes[0];
+
+    /* CMPXCHG: 0F B0 and 0F B1 */
+    return (opcode[0] == 0x0f && 
+        (opcode[1] == 0xb0 || opcode[1] == 0xb1) && 
+        X86_MODRM_MOD(modrm) != 3);
+}
+
+int
 is_insn_type_x(struct insn *insn)
 {
     insn_attr_t *attr = &insn->attr;
@@ -120,6 +132,18 @@ is_insn_movbe(struct insn *insn)
     /* MOVBE: 0F 38 F0 and 0F 38 F1 */
     return (opcode[0] == 0x0f && opcode[1] == 0x38 &&
         (opcode[2] == 0xf0 || opcode[2] == 0xf1));
+}
+
+int
+is_insn_cmovcc(struct insn *insn)
+{
+    u8 *opcode = insn->opcode.bytes;
+    u8 modrm = insn->modrm.bytes[0];
+    
+    /* CMOVcc: 0F 40 - 0F 4F */
+    return (opcode[0] == 0x0f && 
+        ((opcode[1] & 0xf0) == 0x40) &&
+        X86_MODRM_MOD(modrm) != 3);
 }
 
 /* Check if the memory addressing expression uses %rsp/%esp. */
