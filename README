@@ -8,3 +8,61 @@ Currently, RaceHound is intended for systems with x86 architecture,
 both 32- and 64-bit.
 
 Project site: http://github.com/winnukem/racehound
+
+Basic Usage
+--------------
+
+Use case 1.
+ 
+Suppose you would like to find out if there is a race in the kernel module 
+named "foo_driver" between the instruction at the offset 0xf00d in the 
+function "bar".
+
+Here we assume RaceHound is installed to the default location (/usr/local/...).
+
+1. Unload foo_driver if it is already loaded.
+
+2. If debugfs is not mounted, mount it:
+
+    # mount -t debugfs none /sys/kernel/debug
+
+3. Load RaceHound and specify the name of the target:
+  
+    # insmod race_hound.ko target_name=foo_driver
+
+4. You may instruct RaceHound to monitor the instruction at bar+0xf00d
+already (or you may do so after you load the target module).
+
+    # echo 'bar+0xf00d' > /sys/kernel/debug/rhound/breakpoints
+
+You can use RaceHound to monitor more than one instruction at a time, if you
+like. Just echo their locations to the 'breakpoints' file one at a time, as
+shown above.
+
+If you would like RaceHound to stop monitoring the instruction, prepend '-'
+to the appropriate string:
+
+    # echo '-bar+0xf00d' > /sys/kernel/debug/rhound/breakpoints
+
+'cat /sys/kernel/debug/rhound/breakpoints' will show you the current list of
+monitored instructions.
+
+5. Now load foo_driver and do something with it.
+
+6. If RaceHound detects a race, it will output a message similar to the 
+following one to the system log:
+
+  [rh] Detected a data race on the memory at ffff8800377214c0 
+  between the instruction at ffffffffa0392b6d 
+    (e1000_clean+0x18d/0x950 [e1000], CPU=0, 
+     task_struct=ffff8800b061dc40, comm: "kworker/0:1") 
+  and the instruction right before ffffffffa0390b18 
+    (e1000_xmit_frame+0x928/0x1020 [e1000], CPU=1, 
+     task_struct=ffff88011a535c40, comm: "Socket Thread") 
+
+If foo_driver is built with debug info, you can use addr2line or a similar 
+tool to find the source lines corresponding to the conflicting instruction.
+
+7. When you are through with foo_driver, unload it.
+
+8. Unload RaceHound.
