@@ -169,6 +169,10 @@ kedr_load_function_list(struct module *target_module)
 	int i;
 	
 	BUG_ON(target_module == NULL);
+    
+	/* Clear the list first. */
+	tmod_funcs_destroy_all();
+	num_funcs = 0;
 	
 	ret = kallsyms_on_each_symbol(symbol_walk_callback, 
 		(void *)target_module);
