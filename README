@@ -28,7 +28,12 @@ Here we assume RaceHound is installed to the default location (/usr/local/...).
 
 3. Load RaceHound and specify the name of the target:
   
-    # insmod race_hound.ko target_name=foo_driver
+    # insmod /usr/local/lib/modules/$(uname -r)/misc/race_hound.ko \
+        target_name=foo_driver
+
+Note. You can also specify how long (in milliseconds) to delay execution of a 
+monitored instruction when waiting for a conflicting access. Parameter 'delay'
+is used for this. 0 means the default value, which is acceptable in most cases.
 
 4. You may instruct RaceHound to monitor the instruction at bar+0xf00d
 already (or you may do so after you load the target module).
