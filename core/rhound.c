@@ -41,6 +41,7 @@
 #include <linux/hw_breakpoint.h>
 #include <linux/kref.h>
 #include <linux/uaccess.h>
+#include <linux/preempt.h>
 
 #include "decoder.h"
 #include "sections.h"
@@ -100,13 +101,6 @@ module_param(delay, ulong, S_IRUGO);
 /* Offset of the insn in the target function to set the sw bp to. */
 static unsigned int bp_offset = RH_ALL_OFFSETS;
 module_param(bp_offset, uint, S_IRUGO);
-
-#define BP_TIMER_INTERVAL (HZ / 10)
-
-/* We do not set SW BPs during the initialization of the target. If needed,
- * this work is scheduled to do it after the initialization finishes. */
-static void sw_bp_work_fn(struct work_struct *work);
-static DECLARE_DELAYED_WORK(bp_work, sw_bp_work_fn);
 
 static void addr_work_fn(struct work_struct *work);
 static DECLARE_DELAYED_WORK(addr_work, addr_work_fn);
@@ -235,6 +229,178 @@ static void * (*do_module_alloc)(unsigned long) = NULL;
 static void (*do_module_free)(struct module *, void *) = NULL;
 /* ====================================================================== */
 
+/* The functions has_*_text() return non-zero if the given module has 
+ * code in the corresponding area, 0 otherwise. 
+ * [NB] It is possible for a module to have only data but no code in a given
+ * area, so we need to check the size of the code too. */
+static inline int
+has_init_text(struct module *mod)
+{
+    return (mod->module_init != NULL && mod->init_text_size > 0);
+}
+
+static inline int
+has_core_text(struct module *mod)
+{
+    return (mod->module_core != NULL && mod->core_text_size > 0);
+}
+
+static int
+is_init_text_address(unsigned long addr, struct module *mod)
+{
+    BUG_ON(mod == NULL);
+    if (has_init_text(mod) &&
+        (addr >= (unsigned long)(mod->module_init)) &&
+        (addr < (unsigned long)(mod->module_init) + mod->init_text_size))
+        return 1;
+    
+    return 0;
+}
+
+static int
+is_core_text_address(unsigned long addr, struct module *mod)
+{
+    BUG_ON(mod == NULL);
+
+    if (has_core_text(mod) &&
+        (addr >= (unsigned long)(mod->module_core)) &&
+        (addr < (unsigned long)(mod->module_core) + mod->core_text_size))
+        return 1;
+    
+    return 0;
+}
+
+/* A helper that prints a given warning message with the information about
+ * the machine instruction at the end. kallsyms are not used to avoid a race
+ * with the changes of the symbol tables after the module containing the 
+ * insn completes initialization. */
+#define rh_warning_insn(str, insn_addr, mod) do { \
+    unsigned long addr_ = (unsigned long)(insn_addr);  \
+    struct module *m_ = (mod);   \
+    if (is_core_text_address(addr_, m_)) {  \
+        pr_warning(str " module_core+0x%lx.\n",   \
+            addr_ - (unsigned long)m_->module_core); \
+    }   \
+    else if (is_init_text_address(addr_, m_)) { \
+        pr_warning(str " module_init+0x%lx.\n",   \
+            addr_ - (unsigned long)m_->module_init); \
+    }   \
+    else {  \
+        pr_warning(str "%p (unknown module).\n", (void *)addr_); \
+    }   \
+} while(0)
+/* ====================================================================== */
+
+/* Information about an event, namely about execution of an instruction. */
+struct rh_event_info {
+    void *addr; /* Address of the insn */
+    int cpu; /* CPU that executed the insn */
+    
+    /* Information about the task that executed the insn. */
+    struct task_struct *task; 
+    const char *comm;
+};
+
+static char *
+format_event_info_kallsyms(const struct rh_event_info *ei)
+{
+    static const char* fmt = 
+        "%p (%pS, CPU=%d, task_struct=%p, comm: \"%s\")";
+    int len;
+    char *str;
+    
+    len = snprintf(NULL, 0, fmt, ei->addr, ei->addr, ei->cpu, ei->task, 
+                   ei->comm) + 1;
+    str = kzalloc((size_t)len, GFP_ATOMIC);
+    if (str != NULL) {
+        snprintf(str, len, fmt, ei->addr, ei->addr, ei->cpu, ei->task, 
+                 ei->comm);
+    }
+        
+    return str;
+}
+
+static char *
+format_event_info_plain(const struct rh_event_info *ei, struct module *mod)
+{
+    /* [NB] This function is only called when ei->addr is in a core area of
+     * a kernel module. */
+    static const char *fmt = 
+        "%p (module_core+0x%lx [%s], CPU=%d, task_struct=%p, comm: \"%s\")";
+        
+    unsigned long offset = 
+        (unsigned long)ei->addr - (unsigned long)mod->module_core;
+
+    int len;
+    char *str;
+    
+    len = snprintf(NULL, 0, fmt, ei->addr, offset, module_name(mod), 
+                   ei->cpu, ei->task, ei->comm) + 1;
+    str = kzalloc((size_t)len, GFP_ATOMIC);
+    if (str != NULL) {
+        snprintf(str, len, fmt, ei->addr, offset, module_name(mod), 
+                 ei->cpu, ei->task, ei->comm);
+    }
+        
+    return str;
+}
+
+/* Returns a string representation of the data from 'ei'. The returned 
+ * pointer must be passed to kfree() when no longer needed. 
+ *
+ * The function returns NULL if it has failed to prepare the string. 
+ *
+ * All this is needed to avoid a race on symbol tables of the kernel 
+ * modules. When one prints a symbol using %pS or the like, kallsyms looks
+ * through the symbol tables of the kernel and the modules. However, after
+ * a module's init function has completed, the symbol tables change because
+ * init-only symbols are discarded by the module loader. This may lead to
+ * problems that occur rarely but are difficult to diagnoze.
+ * 
+ * This function uses symbol resolution when it is safe and outputs less
+ * info otherwise (e.g., "module_core+0x1234" can be output instead of
+ * "my_cool_func+0x34"). */
+static char *
+format_event_info(const struct rh_event_info *ei)
+{
+    struct module *mod;
+    char *str;
+    int init_finished;
+    
+    preempt_disable(); /* needed by __module_address() */
+    mod = __module_address((unsigned long)ei->addr);
+    if (mod == NULL) {
+        /* The event happened in the kernel proper, it is safe to use symbol
+         * lookups. */
+        str = format_event_info_kallsyms(ei);
+        preempt_enable();
+        return str;
+    }
+
+    /* module_init is set to NULL after the symbol tables have changed and
+     * the init area of the module has been deallocated. Let's hope some of 
+     * these operations act as a write barrier. If so, the read barrier here
+     * ensures that if we see module_init == NULL, the pointers to the new
+     * symbol tables are already visible to us and kallsyms can be used 
+     * safely. */
+    init_finished = (mod->module_init == NULL);
+    smp_rmb();
+    
+    /* If the initialization of the module has already finished, it is OK to
+     * use kallsyms to resolve the instruction address. 
+     * Same if the instruction itself is from the init area: that code now
+     * waits for us to handle the events and therefore symbol tables cannot 
+     * change under our feet. */
+    if (init_finished || is_init_text_address((unsigned long)ei->addr, mod))
+        str = format_event_info_kallsyms(ei);
+    else
+        str = format_event_info_plain(ei, mod);
+
+    preempt_enable();
+    return str;
+}
+/* ====================================================================== */
+
 static struct hw_bp {
     struct perf_event * __percpu *pev;
     
@@ -282,14 +448,16 @@ static unsigned long placeholder_addr = (unsigned long)addr_work_fn;
 static void hw_bp_handler(struct perf_event *event,
     struct perf_sample_data *data, struct pt_regs *regs)
 {
-    struct task_struct *first_task = NULL;
-    int first_cpu;
-    const char *first_comm = NULL;
-
     struct task_struct *tsk = current;
     int cpu = raw_smp_processor_id();
     unsigned long flags;
     int i;
+    
+    struct rh_event_info first_event = {};
+    struct rh_event_info new_event = {};
+    
+    char *str_first;
+    char *str_new;
     
     spin_lock_irqsave(&hw_bp_lock, flags);
     if (event->attr.disabled) {
@@ -315,21 +483,34 @@ static void hw_bp_handler(struct perf_event *event,
         goto out;
     }
     
-    first_cpu = breakinfo[i].swbp->cpu;
-    first_task = breakinfo[i].swbp->task;
-    first_comm = (first_task == NULL ? "<unknown>" : first_task->comm);
+    first_event.addr = breakinfo[i].swbp->addr;
+    first_event.cpu = breakinfo[i].swbp->cpu;
+    first_event.task = breakinfo[i].swbp->task;
+    first_event.comm = 
+        (first_event.task == NULL ? "<unknown>" : first_event.task->comm);
 
-    pr_info("[rh] Detected a data race on the memory at %p between "
-        "the instruction at %p (%pS, CPU=%d, task_struct=%p, comm: \"%s\") "
-        "and the instruction right before "
-        "%p (%pS, CPU=%d, task_struct=%p, comm: \"%s\")\n",
-        (void *)(unsigned long)event->attr.bp_addr,
-        breakinfo[i].swbp->addr, breakinfo[i].swbp->addr, 
-        first_cpu, first_task, first_comm,
-        (void *)regs->ip, (void *)regs->ip, cpu, tsk, tsk->comm);
+    new_event.addr = (void *)regs->ip;
+    new_event.cpu = cpu;
+    new_event.task = tsk;
+    new_event.comm = tsk->comm;
     
-    // TODO: if some other data are needed, you may pass them here via
-    // breakinfo[i].swbp
+    str_first = format_event_info(&first_event);
+    str_new = format_event_info(&new_event);
+    
+    if (str_first != NULL && str_new != NULL) {
+        pr_info("[rh] Detected a data race on the memory block at %p "
+"between the instruction at %s and the instruction right before %s.\n",
+            (void *)(unsigned long)event->attr.bp_addr, str_first, str_new);
+    }
+    else {
+        pr_warning("[rh] Failed to prepare a message about a race.\n");
+    }
+    
+    kfree(str_first);
+    kfree(str_new);
+    
+    /* [NB] If some other data are needed, you may pass them here via
+     * breakinfo[i].swbp */
     
     breakinfo[i].race_found = 1;
     atomic_inc(&race_counter);
@@ -783,39 +964,6 @@ sw_bp_set(void)
 {
     struct sw_used *bp;
     
-    /* Currently, it may be unsafe to track the execution of the target 
-     * while it performs its initialization. To be exact, it may be unsafe
-     * to use kallsyms to resolve the names of the symbols (directly or 
-     * indirectly via %pS in printk(), via dump_stack(), etc.) concurrently
-     * with the operations the module loader performs right after the 
-     * init function of the target returns. In some kernel versions, the 
-     * loader evicted the init-only symbols from the symbol tables at that
-     * point and accessing the symbol tables for the target module resulted
-     * in a race with unpredictable consequences, including occasional 
-     * crashes.
-     * For the present, we do not set the software BPs if the target's 
-     * initialization is still in progress. The delayed work to set the BP
-     * is scheduled as usual, however, so the breakpoint should be set 
-     * eventually. 
-     * 
-     * [NB] module_init is set to NULL by the loader last and the locks act 
-     * as memory barriers among other things, so it seems reasonable to 
-     * check module_init here.
-     * 
-     * TODO: find a way to get around this limitation because it makes it 
-     * impossible to track the initialization of the target where the races
-     * are also quite likely. Either prove that this symbol table race is
-     * no longer possible in the kernels RaceHound supports, or implement
-     * symbol resolution without kallsyms, or output just the sections and
-     * the offsets there and resolve the symbols in user space, or ... */
-    if (target_module && target_module->module_init) {
-        /* pr_warning("[rh] "
-        "Attempt to set a software breakpoint before the initialization "
-        "of the target is complete. Skipping.\n"); */
-        schedule_delayed_work(&bp_work, BP_TIMER_INTERVAL);
-        return;
-    }
-    
     list_for_each_entry(bp, &active_list, a_lst) 
     {
         if (!bp->set)
@@ -824,20 +972,6 @@ sw_bp_set(void)
             bp->set = 1;
         }
     }
-}
-
-static void 
-sw_bp_work_fn(struct work_struct *work)
-{
-    unsigned long flags;
-    
-    mutex_lock(ptext_mutex);
-    spin_lock_irqsave(&sw_lock, flags);
-    
-    sw_bp_set();
-    
-    spin_unlock_irqrestore(&sw_lock, flags);
-    mutex_unlock(ptext_mutex);
 }
 
 static void
@@ -1487,8 +1621,9 @@ decode_and_get_addr(void *insn_addr, struct pt_regs *regs,
     }
     
     /* A tracked insn of an unknown kind. */
-    pr_warning("[rh] Got a tracked insn of an unknown kind at %pS.\n",
-        insn_addr);
+    rh_warning_insn("[rh] Got a tracked insn of an unknown kind at ", 
+                    insn_addr, target_module);
+    
     WARN_ON_ONCE(1);
     return NULL;
 }
@@ -1710,7 +1845,6 @@ detach_from_target(void)
     struct sw_used *used_tmp;
     
     cancel_delayed_work_sync(&addr_work);
-    cancel_delayed_work_sync(&bp_work);
 
     // TODO: use module_mutex to synchronize with loading/unloading of the
     // target properly and to serialize accessed to 'target_module'?
@@ -1886,9 +2020,9 @@ rhound_real_handler(void)
         return;
     
     if (size == 0) {
-        pr_info("[rh] "
-"Failed to obtain the address and size of the data accessed at %pS.\n",
-            (void *)addr->return_addr);
+        rh_warning_insn("[rh] " 
+            "Failed to obtain the address and size of the data accessed at",
+            (void *)addr->return_addr, target_module);
         return;
     }
     
@@ -1942,17 +2076,28 @@ rhound_real_handler(void)
          * check if the data in the accessed memory area have changed 
          * ("repeated read technique"). */
         if (!race_found && memcmp(&data[0], ea, nbytes_to_check) != 0) {
-            struct task_struct *first_task = addr->swbp->task;
-            int first_cpu = addr->swbp->cpu;
-            const char *first_comm = first_task->comm;
+            struct rh_event_info first;
+            char *str;
             
-            pr_info("[rh] Detected a data race on the memory at %p "
-            "that is about to be accessed by the instruction at "
-            "%p (%pS, CPU=%d, task_struct=%p, comm: \"%s\"): "
-        "the contents of that memory area have changed during the delay.\n",
-                ea, 
-                (void *)addr->return_addr, (void *)addr->return_addr,
-                first_cpu, first_task, first_comm);
+            first.addr = (void *)addr->return_addr;
+            first.cpu = addr->swbp->cpu;
+            first.task = addr->swbp->task;
+            first.comm = first.task->comm;
+            
+            str = format_event_info(&first);
+            if (str != NULL) {
+                pr_info(
+        "[rh] Detected a data race on the memory block at %p "
+        "that is about to be accessed by the instruction at %s: "
+        "the memory block was modified during the delay.\n",
+                    ea, str);
+            }
+            else {
+                pr_warning(
+                    "[rh] Failed to prepare a message about a race.\n");
+            }
+            
+            kfree(str);
             atomic_inc(&race_counter);
         }
     }
