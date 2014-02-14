@@ -62,7 +62,7 @@ static struct module* target_module = NULL;
 static void *detour_area = NULL;
 
 static struct dentry *debugfs_dir_dentry = NULL;
-static const char *debugfs_dir_name = "rhound";
+static const char *debugfs_dir_name = "race_hound";
 
 /* Counter for the races found */
 static struct dentry *race_counter_file = NULL;

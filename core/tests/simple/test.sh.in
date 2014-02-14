@@ -42,11 +42,11 @@ if ! ${insmod_command} ${target_module}; then
 fi
 
 if test $1 = "--offset"; then
-    echo "${target_function}+${bp_offset}" > $DEBUGFS_DIR/rhound/breakpoints
+    echo "${target_function}+${bp_offset}" > $DEBUGFS_DIR/race_hound/breakpoints
 elif test $1 = "--function"; then
-    echo "${target_function}+*" > $DEBUGFS_DIR/rhound/breakpoints
+    echo "${target_function}+*" > $DEBUGFS_DIR/race_hound/breakpoints
 else
-    echo "${target_function}+${bp_offset}" > $DEBUGFS_DIR/rhound/breakpoints
+    echo "${target_function}+${bp_offset}" > $DEBUGFS_DIR/race_hound/breakpoints
 fi
 
 # Test itself.
@@ -70,7 +70,7 @@ if ! ${rmmod_command} ${target_module}; then
 	exit 1
 fi
 
-race_count=`cat "$DEBUGFS_DIR/rhound/race_count"`
+race_count=`cat "$DEBUGFS_DIR/race_hound/race_count"`
 
 if test -z "$race_count"; then
 	printf "Failed to read counter of race found\n"

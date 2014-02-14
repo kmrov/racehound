@@ -16,16 +16,15 @@ kbuild_include_directories(
 kbuild_add_module(${kmodule_name}
 	"rhound.c"
 	"functions.c"
-#	"bp.c"
 	"sections.c"
 	"decoder.c"
-    "wrapper.S"
+	"wrapper.S"
 
 # Only for dependencies	
 	"functions.h"
-#	"bp.h"
 	"sections.h"
 	"decoder.h"
+
 # Arch-dependent sources and header
     "${arch_dir}/lib/inat.c"
     "${arch_dir}/lib/insn.c"

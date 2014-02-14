@@ -74,7 +74,7 @@ fi
 # Pass the collected data to the kernel-mode part of our system via debugfs.
 TMP_DIR="@RH_PREFIX_TEMP@/sections"
 DEBUGFS_DIR="${TMP_DIR}/debug"
-SECTIONS_FILE="${DEBUGFS_DIR}/rhound/data"
+SECTIONS_FILE="${DEBUGFS_DIR}/race_hound/data"
 
 rm -rf "${TMP_DIR}"
 mkdir -p "${TMP_DIR}"

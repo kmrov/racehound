@@ -38,7 +38,7 @@ is used for this. 0 means the default value, which is acceptable in most cases.
 4. You may instruct RaceHound to monitor the instruction at bar+0xf00d
 already (or you may do so after you load the target module).
 
-    # echo 'bar+0xf00d' > /sys/kernel/debug/rhound/breakpoints
+    # echo 'bar+0xf00d' > /sys/kernel/debug/race_hound/breakpoints
 
 You can use RaceHound to monitor more than one instruction at a time, if you
 like. Just echo their locations to the 'breakpoints' file one at a time, as
@@ -47,10 +47,10 @@ shown above.
 If you would like RaceHound to stop monitoring the instruction, prepend '-'
 to the appropriate string:
 
-    # echo '-bar+0xf00d' > /sys/kernel/debug/rhound/breakpoints
+    # echo '-bar+0xf00d' > /sys/kernel/debug/race_hound/breakpoints
 
-'cat /sys/kernel/debug/rhound/breakpoints' will show you the current list of
-monitored instructions.
+'cat /sys/kernel/debug/race_hound/breakpoints' will show you the current
+list of monitored instructions.
 
 5. Now load foo_driver and do something with it.
 
