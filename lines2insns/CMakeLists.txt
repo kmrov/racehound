@@ -8,5 +8,6 @@ add_executable(lines2insns
 	"main.cpp"
 	"${ARCH_SOURCE_DIR}/lib/inat.c"
 	"${ARCH_SOURCE_DIR}/lib/insn.c"
-	"${ARCH_BINARY_DIR}/lib/inat-tables.h"
 )
+
+# TODO

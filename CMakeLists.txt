@@ -154,11 +154,34 @@ check_module_build()
 check_kernel_config()
 #######################################################################
 
+# The kernel-space part of the system
 add_subdirectory(core)
-add_subdirectory(lines2insns)
 
-#add_subdirectory(tools)
+# Build the GCC plugin only if GCC is used as the compiler.
+if (CMAKE_COMPILER_IS_GNUCC)
+	# TODO: Check if GCC's version is 4.8 or newer, also check if GCC 
+	# supports plugins (ask for plugin directory?). If these conditions
+	# are not met, warn and do not build "ma_lines" plugin.
+
+	# This GCC plugin can be used when compiling the sources of the 
+	# kernel and the modules to output the source lines (file:line or 
+	# so) where memory accesses happen, hence "ma_" in the name.
+	add_subdirectory(ma_lines)
+else ()
+	message(WARNING 
+	"GCC plugin \"ma_lines\" can only be built with GCC, skipping.")
+endif ()
+
+# This tool takes the list of source lines (e.g., collected by "ma_lines"
+# plugin) as well as the binary file with debug info and outputs the 
+# locations of instructions corresponding to those lines, filtered as 
+# necessary.
+# Format: [module_name:](init|core)+0xoffset, one record per line.
+# TODO: Check for libelf and libdw.
+# TODO: Implement the app.
+add_subdirectory(lines2insns)
 #######################################################################
+
 configure_file("${CMAKE_SOURCE_DIR}/config.h.in" 
 	"${CMAKE_BINARY_DIR}/config.h")
 message(STATUS "Creating config.h - done")
