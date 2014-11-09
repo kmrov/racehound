@@ -18,8 +18,8 @@ endif ()
 # Names and versions
 set(RH_PACKAGE_NAME "RaceHound")
 
-set(RH_VERSION_MAJOR 0)
-set(RH_VERSION_MINOR 1)
+set(RH_VERSION_MAJOR 1)
+set(RH_VERSION_MINOR 0)
 set(RH_VERSION_MICRO 0)
 # "Version suffix, a string that should be appended to the version"
 set(RH_VERSION_SUFFIX "-devel")
