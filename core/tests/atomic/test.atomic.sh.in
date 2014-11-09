@@ -27,8 +27,7 @@ if ! mount -t debugfs none "$DEBUGFS_DIR"; then
 fi
 
 # Prepare to test
-if ! ${insmod_command} ${core_module} target_name=${target_name} \
-        rh_get_sections_path="@CMAKE_BINARY_DIR@/core/um_helpers/rh_test_get_sections.sh"; then
+if ! ${insmod_command} ${core_module} target_name=${target_name}; then
     printf "Failed to load core module into kernel.\n"
     umount "$DEBUGFS_DIR"
     exit 1

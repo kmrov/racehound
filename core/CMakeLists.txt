@@ -9,13 +9,11 @@ kbuild_include_directories(
 kbuild_add_module(${kmodule_name}
 	"rhound.c"
 	"functions.c"
-	"sections.c"
 	"decoder.c"
 	"wrapper.S"
 
 # Only for dependencies	
 	"functions.h"
-	"sections.h"
 	"decoder.h"
 
 # Arch-dependent sources and headers
@@ -27,8 +25,6 @@ kbuild_add_module(${kmodule_name}
 add_dependencies(${kmodule_name} insn_decoder_headers)
 
 rh_install_kmodule(${kmodule_name})
-
-add_subdirectory(um_helpers)
 
 # Testing
 add_subdirectory(tests)

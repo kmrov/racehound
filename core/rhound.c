@@ -44,7 +44,6 @@
 #include <linux/preempt.h>
 
 #include "decoder.h"
-#include "sections.h"
 #include "functions.h"
 /* ====================================================================== */
 
@@ -1915,7 +1914,6 @@ rhound_detector_notifier_call(struct notifier_block *nb,
             module_name(mod),
             (unsigned long)mod->module_core, mod->core_size);
         
-        kedr_print_section_info(target_name);
         ret = kedr_load_function_list(mod);
         if (ret) {
             pr_warning("[rh] "
@@ -2533,17 +2531,13 @@ racehound_module_init(void)
         pr_err("[rh] Failed to create race counter file in debugfs.");
         goto out_rmdir;
     }
-
-    ret = kedr_init_section_subsystem(debugfs_dir_dentry);
-    if (ret != 0)
-        goto out_rmcounter;
     
     ret = kedr_init_function_subsystem();
     if (ret != 0) {
         pr_err("[rh] "
             "Error occured in kedr_init_function_subsystem(). Code: %d\n",
             ret);
-        goto out_rmsection;
+        goto out_rmcounter;
     }
     
     /* Module notifier should be registered after all other initialization
@@ -2559,8 +2553,6 @@ racehound_module_init(void)
 
 out_func:
     kedr_cleanup_function_subsystem();
-out_rmsection:    
-    kedr_cleanup_section_subsystem();
 out_rmcounter:
     debugfs_remove(race_counter_file);
 out_rmdir:
@@ -2588,7 +2580,6 @@ racehound_module_exit(void)
     }
 
     kedr_cleanup_function_subsystem();
-    kedr_cleanup_section_subsystem();
     debugfs_remove(race_counter_file);
     debugfs_remove(bp_file);
     debugfs_remove(debugfs_dir_dentry);
