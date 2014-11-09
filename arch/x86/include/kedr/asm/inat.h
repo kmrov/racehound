@@ -25,6 +25,10 @@
  */
 #include "inat_types.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * Internal bits. Don't use bitmasks directly, because these bits are
  * unstable. You should use checking functions.
@@ -400,4 +404,9 @@ inat_reg_usage_attribute(const insn_attr_t *ia)
 	unsigned int attr = ia->attributes;
 	return (attr & INAT_USES_REG_MASK) >> INAT_USES_REG_OFFS;
 }
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif /* _ASM_X86_INAT_H */

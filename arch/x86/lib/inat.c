@@ -21,7 +21,15 @@
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *
  */
-#include <linux/string.h>
+
+/* The instruction decoder may be used by both kernel-space and user-space
+ * components. */
+#ifdef __KERNEL__
+#  include <linux/string.h>
+#else
+#  include <string.h>
+#endif
+
 #include <kedr/asm/insn.h>
 
 /* Attribute tables are generated from opcode map */

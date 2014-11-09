@@ -23,7 +23,14 @@
  * Copyright (C) IBM Corporation, 2002, 2004, 2009
  */
 
-#include <linux/string.h>
+/* The instruction decoder may be used by both kernel-space and user-space
+ * components. */
+#ifdef __KERNEL__
+#  include <linux/string.h>
+#else
+#  include <string.h>
+#endif
+
 #include <kedr/asm/inat.h>
 #include <kedr/asm/insn.h>
 
@@ -105,7 +112,7 @@ found:
 	}
 	/* Set the last prefix */
 	if (lb && lb != insn->prefixes.bytes[3]) {
-		if (unlikely(insn->prefixes.bytes[3])) {
+		if (insn->prefixes.bytes[3]) {
 			/* Swap the last prefix */
 			b = insn->prefixes.bytes[3];
 			for (i = 0; i < nb; i++)
@@ -556,13 +563,13 @@ insn_has_size_override_prefix(struct insn *insn) {
  * See insn_is_noop() for details and for the description of 'rex' 
  * parameter. */
 static int 
-insn_lea_is_noop(struct insn *insn, u8 rex)
+insn_lea_is_noop(struct insn *insn, unsigned char rex)
 {
-	u8 modRM = insn->modrm.bytes[0];
-	u8 modRM_mod, modRM_reg, modRM_rm;
+	unsigned char modRM = insn->modrm.bytes[0];
+	unsigned char modRM_mod, modRM_reg, modRM_rm;
 	
-	u8 sib = insn->sib.bytes[0];  /* missing fields are 0 */
-	u8 sib_ss, sib_index, sib_base;
+	unsigned char sib = insn->sib.bytes[0];  /* missing fields are 0 */
+	unsigned char sib_ss, sib_index, sib_base;
 	
 	modRM_mod = X86_MODRM_MOD(modRM);
 	modRM_reg = X86_MODRM_REG(modRM);
@@ -654,8 +661,8 @@ int insn_is_noop(struct insn *insn)
 	 * REX prefix of no-ops on x86-64 will hold for this fake prefix 
 	 * on x86-32 too: REX.W==1, REX.X == 0; REX.R==REX.B; REX.X==REX.R,
 	 * where applicable. */ 
-	u8 rex;
-	u8 modRM;
+	unsigned char rex;
+	unsigned char modRM;
 
 	/* Decode the instruction if it is not already decoded. */
 	insn_get_length(insn); 
@@ -1190,6 +1197,7 @@ insn_is_mem_write(struct insn *insn)
 	return ((attr & INAT_MEM_CAN_WRITE) && modrm_mem);
 }
 
+#ifdef __KERNEL__
 /** 
  * insn_jumps_to() - Return the destination of control transfer
  * @insn:	&struct insn containing the instruction
@@ -1210,7 +1218,7 @@ insn_is_mem_write(struct insn *insn)
 unsigned long
 insn_jumps_to(struct insn *insn)
 {
-	u8 opcode; 
+	unsigned char opcode; 
 	
 	/* decode the instruction if it is not decoded yet */
 	insn_get_length(insn); 
@@ -1220,7 +1228,7 @@ insn_jumps_to(struct insn *insn)
 	/* jcc short, jmp short */
 	if ((opcode >= 0x70 && opcode <= 0x7f) || (opcode == 0xe3) || 
 	    opcode == 0xeb) {
-		s32 offset = (s32)(s8)insn->immediate.bytes[0];
+		__s32 offset = (__s32)(signed char)insn->immediate.bytes[0];
 		return (unsigned long)X86_ADDR_FROM_OFFSET(insn->kaddr, 
 			insn->length, offset); 
 	}
@@ -1239,7 +1247,7 @@ insn_jumps_to(struct insn *insn)
 	
 	/* loop* */
 	if (opcode >= 0xe0 && opcode <= 0xe2) {
-		s32 offset = (s32)(s8)insn->immediate.bytes[0];
+		__s32 offset = (__s32)(signed char)insn->immediate.bytes[0];
 		return (unsigned long)X86_ADDR_FROM_OFFSET(insn->kaddr, 
 			insn->length, offset); 
 	}
@@ -1263,6 +1271,7 @@ insn_jumps_to(struct insn *insn)
 	
 	return 0; /* no jump */
 }
+#endif /* __KERNEL__ */
 
 /** 
  * insn_is_string_op() - Check if the instruction is a string operation.
@@ -1275,7 +1284,7 @@ insn_jumps_to(struct insn *insn)
 int 
 insn_is_string_op(struct insn *insn)
 {
-	u8 opcode; 
+	unsigned char opcode; 
 
 	insn_get_opcode(insn); 
 	opcode = insn->opcode.bytes[0];
@@ -1300,12 +1309,12 @@ insn_is_string_op(struct insn *insn)
 int 
 insn_is_locked_op(struct insn *insn)
 {
-	u8 opcode; 
-	u8 mod;
+	unsigned char opcode; 
+	unsigned char mod;
 
 	insn_get_modrm(insn); 
 	opcode = insn->opcode.bytes[0];
-	mod = (u8)X86_MODRM_MOD(insn->modrm.value);
+	mod = (unsigned char)X86_MODRM_MOD(insn->modrm.value);
 	
 	return (insn_has_prefix(insn, 0xf0) ||
 		((opcode == 0x86 || opcode == 0x87) && mod != 3));

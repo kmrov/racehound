@@ -1,17 +1,10 @@
 set(kmodule_name "race_hound")
 
-# In the future, it should be configurable somehow
-set(arch "x86")
-
-set(arch_dir "arch/${arch}")
-
-file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/${arch_dir}/lib)
-
 kbuild_include_directories(
-	"${CMAKE_CURRENT_SOURCE_DIR}/${arch_dir}/include"
-	"${CMAKE_CURRENT_BINARY_DIR}/${arch_dir}/lib"
+	"${ARCH_SOURCE_DIR}/include"
+	"${ARCH_BINARY_DIR}/lib"
 	"${CMAKE_CURRENT_SOURCE_DIR}"
-	)
+)
 
 kbuild_add_module(${kmodule_name}
 	"rhound.c"
@@ -25,18 +18,13 @@ kbuild_add_module(${kmodule_name}
 	"sections.h"
 	"decoder.h"
 
-# Arch-dependent sources and header
-    "${arch_dir}/lib/inat.c"
-    "${arch_dir}/lib/insn.c"
-    "${arch_dir}/lib/inat-tables.h"
-    )
+# Arch-dependent sources and headers
+	"${ARCH_SOURCE_DIR}/lib/inat.c"
+	"${ARCH_SOURCE_DIR}/lib/insn.c"
+	"${ARCH_BINARY_DIR}/lib/inat-tables.h"
+)
 
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${arch_dir}/lib/inat-tables.h"
-			COMMAND LC_ALL=C awk -f "${CMAKE_CURRENT_SOURCE_DIR}/${arch_dir}/tools/gen-insn-attr-x86.awk"
-				"${CMAKE_CURRENT_SOURCE_DIR}/${arch_dir}/lib/x86-opcode-map.txt" >
-				"${CMAKE_CURRENT_BINARY_DIR}/${arch_dir}/lib/inat-tables.h"
-			DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${arch_dir}/lib/x86-opcode-map.txt"
-			)
+add_dependencies(${kmodule_name} insn_decoder_headers)
 
 rh_install_kmodule(${kmodule_name})
 

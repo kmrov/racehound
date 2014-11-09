@@ -25,8 +25,14 @@
  * Copyright (C) IBM Corporation, 2009
  */
 
+#include <linux/types.h>
+
 /* insn_attr_t is defined in inat.h */
 #include "inat.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* Total number of meaningful legacy prefixes. At most one prefix from each
  * of the following groups is meaningful for an instruction:
@@ -246,6 +252,7 @@ static inline unsigned int insn_offset_immediate(struct insn *insn)
  * We just follow the implementation of kernel probes in this case. */
 #define X86_MAX_INSN_SIZE 	16
 
+#ifdef __KERNEL__
 /* X86_ADDR_FROM_OFFSET()
  * 
  * Calculate the memory address being the operand of a given instruction 
@@ -264,11 +271,12 @@ static inline unsigned int insn_offset_immediate(struct insn *insn)
  * 32-bit displacement sign extended to 64 bits in 64-bit mode." */
 #ifdef CONFIG_X86_64
 # define X86_ADDR_FROM_OFFSET(insn_addr, insn_len, offset) \
-	(void *)((s64)(insn_addr) + (s64)(insn_len) + (s64)(s32)(offset))
+	(void *)((__s64)(insn_addr) + (__s64)(insn_len) +  \
+	(__s64)(__s32)(offset))
 
 #else /* CONFIG_X86_32 */
 # define X86_ADDR_FROM_OFFSET(insn_addr, insn_len, offset) \
-	(void *)((u32)(insn_addr) + (u32)(insn_len) + (u32)(offset))
+	(void *)((__u32)(insn_addr) + (__u32)(insn_len) + (__u32)(offset))
 #endif
 
 /* X86_OFFSET_FROM_ADDR()
@@ -277,17 +285,18 @@ static inline unsigned int insn_offset_immediate(struct insn *insn)
  * to be used in an instruction given the address and length of the
  * instruction and the destination address it must refer to. */
 #define X86_OFFSET_FROM_ADDR(insn_addr, insn_len, dest_addr) \
-	(u32)((unsigned long)(dest_addr) - \
-		((unsigned long)(insn_addr) + (u32)insn_len))
+	(__u32)((unsigned long)(dest_addr) - \
+		((unsigned long)(insn_addr) + (__u32)insn_len))
+#endif /* __KERNEL__ */
 
 /* X86_SIGN_EXTEND_V32()
  *
  * Just a cast to unsigned long on x86-32. 
  * On x86-64, sign-extends a 32-bit value to and casts the result to 
  * unsigned long. */
-#define X86_SIGN_EXTEND_V32(val) ((unsigned long)(long)(s32)(val))
-
+#define X86_SIGN_EXTEND_V32(val) ((unsigned long)(long)(__s32)(val))
 /* ====================================================================== */
+
 /* Returns nonzero if 'insn' is a no-op instruction of one of the commonly 
  * used kinds. If the function returns nonzero, 'insn' is a no-op. If it 
  * returns 0, 'insn' may or may not be a no-op. */ 
@@ -328,5 +337,9 @@ extern int insn_has_prefix(struct insn *insn, insn_byte_t prefix);
  * XCHG reg, mem and the instructions with LOCK prefix are considered 
  * locked operations */
 extern int insn_is_locked_op(struct insn *insn);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _ASM_X86_INSN_H */
