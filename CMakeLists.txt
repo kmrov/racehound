@@ -172,12 +172,15 @@ else ()
 	"GCC plugin \"ma_lines\" can only be built with GCC, skipping.")
 endif ()
 
+# Check if the development files for libelf and libdw are available.
+check_libelf_devel()
+check_libdw_devel()
+
 # This tool takes the list of source lines (e.g., collected by "ma_lines"
 # plugin) as well as the binary file with debug info and outputs the 
 # locations of instructions corresponding to those lines, filtered as 
 # necessary.
 # Format: [module_name:](init|core)+0xoffset, one record per line.
-# TODO: Check for libelf and libdw.
 # TODO: Implement the app.
 add_subdirectory(lines2insns)
 #######################################################################

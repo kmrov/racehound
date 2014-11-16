@@ -1,0 +1,16 @@
+#ifndef CONFIG_LINES2INSNS_H_1604_INCLUDED
+#define CONFIG_LINES2INSNS_H_1604_INCLUDED
+
+/* Specifies whether dwfl_report_elf() has an additional argument,
+ * 'add_p_vaddr'. */
+#cmakedefine RH_DWFL_REPORT_ELF_ADD_P_VADDR
+
+#if defined(RH_DWFL_REPORT_ELF_ADD_P_VADDR)
+# define my_dwfl_report_elf(dwfl_, name_, file_name_, fd_, base_) \
+	dwfl_report_elf(dwfl_, name_, file_name_, fd_, base_, 0)
+#else
+# define my_dwfl_report_elf(dwfl_, name_, file_name_, fd_, base_) \
+	dwfl_report_elf(dwfl_, name_, file_name_, fd_, base_)
+#endif
+
+#endif /* CONFIG_LINES2INSNS_H_1604_INCLUDED */

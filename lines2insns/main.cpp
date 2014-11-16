@@ -2,6 +2,9 @@
 
 #include <stdio.h>
 
+#include "config_lines2insns.h"
+/* ====================================================================== */
+
 // TODO: implement
 
 int

@@ -49,6 +49,93 @@ macro(is_path_inside_dir output_var dir path)
         set(${output_var} "TRUE")
     endif(_is_not_inside_dir)
 endmacro(is_path_inside_dir output_var dir path)
+########################################################################
+
+function(check_libelf_devel)
+	# libelf and its development files are required for trace processing
+	# as well as for the tests
+	set(checking_message "Checking for libelf development files")
+	message(STATUS "${checking_message}")
+
+	if(libelf_headers)
+		set(checking_message "${checking_message} [cached] - done")
+	else(libelf_headers)
+		try_compile(libelf_compile_result # Result variable
+			"${CMAKE_BINARY_DIR}/check_libelf_devel/libelf_check" # Binary dir
+			"${CMAKE_SOURCE_DIR}/cmake/other_sources/libelf_check.c" # Source file
+			CMAKE_FLAGS "-DLINK_LIBRARIES:string=elf"
+			OUTPUT_VARIABLE libelf_compile_out)
+		if(NOT libelf_compile_result)
+			message(STATUS "${checking_message} - not found")
+			message(FATAL_ERROR
+				"Unable to find the development files for libelf library.")
+		endif(NOT libelf_compile_result)
+
+		set(libelf_headers "FOUND" CACHE INTERNAL "Whether libelf headers are installed")
+		set(checking_message "${checking_message} - done")
+	endif(libelf_headers)
+
+	message(STATUS "${checking_message}")
+endfunction(check_libelf_devel)
+
+function(check_libdw_devel)
+	# libdw and its development files are required for trace processing.
+	set(checking_message "Checking for libdw development files")
+	message(STATUS "${checking_message}")
+
+	if(libdw_headers)
+		set(checking_message "${checking_message} [cached] - done")
+	else(libdw_headers)
+		try_compile(libdw_compile_result # Result variable
+			"${CMAKE_BINARY_DIR}/check_libdw_devel/libdw_check" # Binary dir
+			"${CMAKE_SOURCE_DIR}/cmake/other_sources/libdw_check.c" # Source file
+			CMAKE_FLAGS "-DLINK_LIBRARIES:string=elf;dw"
+			OUTPUT_VARIABLE libdw_compile_out)
+		if(NOT libdw_compile_result)
+			message(STATUS "${checking_message} - not found")
+			message(FATAL_ERROR
+				"Unable to find the development files for libdw library.")
+		endif(NOT libdw_compile_result)
+
+		set(libdw_headers "FOUND" CACHE INTERNAL "Whether libdw headers are installed")
+		set(checking_message "${checking_message} - done")
+	endif(libdw_headers)
+
+	message(STATUS "${checking_message}")
+endfunction(check_libdw_devel)
+
+# dwfl_report_elf() may have different parameters depending on the version
+# of libdw/libdwfl. See commit 904aec2c2f62b729a536c2259274fdd440b0d923 
+# "Add parameter add_p_vaddr to dwfl_report_elf" in elfutils repository
+# for example.
+# This function sets RH_DWFL_REPORT_ELF_ADD_P_VADDR if dwfl_report_elf()
+# has add_p_vaddr parameter.
+function(check_dwfl_report_elf)
+	set(checking_message "Checking the signature of dwfl_report_elf()")
+	message(STATUS "${checking_message}")
+
+	if(DEFINED dwfl_report_elf_add_p_vaddr_checked)
+		message(STATUS "${checking_message} [cached] - done")
+	else()
+
+		try_compile(dwfl_report_elf_result # Result variable
+			"${CMAKE_BINARY_DIR}/check_dwfl_report_elf/main" # Binary dir
+			"${CMAKE_SOURCE_DIR}/cmake/other_sources/dwfl_report_elf_check.c" # Source file
+			CMAKE_FLAGS "-DLINK_LIBRARIES:string=elf;dw"
+			OUTPUT_VARIABLE compile_out)
+	
+		if (dwfl_report_elf_result)
+			set(RH_DWFL_REPORT_ELF_ADD_P_VADDR "1"
+				CACHE INTERNAL
+				"dwfl_report_elf() has add_p_vaddr parameter.")
+		endif()
+
+		set(dwfl_report_elf_add_p_vaddr_checked "YES" CACHE INTERNAL
+			"dwfl_report_elf() was checked.")
+
+		message(STATUS "${checking_message} - done")
+	endif()
+endfunction(check_dwfl_report_elf)
 
 ########################################################################
 # Test-related macros
