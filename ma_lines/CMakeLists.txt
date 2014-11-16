@@ -41,6 +41,11 @@ add_library(${PLUGIN_NAME} MODULE ${PLUGIN_SOURCES})
 set_target_properties(${PLUGIN_NAME} PROPERTIES 
     PREFIX ""
 )
+
+install (TARGETS ${PLUGIN_NAME}
+    RUNTIME DESTINATION ${RH_INSTALL_PREFIX_LIB_AUX}
+    LIBRARY DESTINATION ${RH_INSTALL_PREFIX_LIB_AUX}
+)
 #######################################################################
 
 # An example based on my "kedr_sample_target" "guinea pig"
