@@ -1,6 +1,8 @@
 #ifndef CONFIG_LINES2INSNS_H_1604_INCLUDED
 #define CONFIG_LINES2INSNS_H_1604_INCLUDED
 
+#define APP_NAME "@APP_NAME@"
+
 /* Specifies whether dwfl_report_elf() has an additional argument,
  * 'add_p_vaddr'. */
 #cmakedefine RH_DWFL_REPORT_ELF_ADD_P_VADDR
