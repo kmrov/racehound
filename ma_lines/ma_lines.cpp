@@ -107,7 +107,8 @@ output_ma_location(gimple stmt, EMemoryAccess ma_type)
 	location_t loc = gimple_location(stmt);
 	const char *src = LOCATION_FILE(loc);
 	unsigned int line = LOCATION_LINE(loc);
-	unsigned int column = LOCATION_COLUMN(loc);
+	/* No need to output the column, it seems to be ignored in debug
+	 * info. */
 	
 	if (src == NULL) {
 		fprintf(stderr, 
@@ -148,7 +149,7 @@ output_ma_location(gimple stmt, EMemoryAccess ma_type)
 		goto unlock;
 	}
 	
-	fprintf(out, "%s:%u:%u", src, line, column);
+	fprintf(out, "%s:%u", src, line);
 	if (ma_type == MA_READ) {
 		fprintf(out, ":read\n");
 	}
