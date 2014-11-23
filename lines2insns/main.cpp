@@ -167,6 +167,13 @@ extract_kmodule_name()
 	
 	kmodule_name = kmodule_file.substr(
 		0, kmodule_file.size() - suffix.size());
+	
+	/* Within the kernel, all modules have dashes replaced with 
+	 * underscores in their names. */
+	for (size_t i = 0; i < kmodule_name.size(); ++i) {
+		if (kmodule_name[i] == '-')
+			kmodule_name[i] = '_';
+	}
 	return true;	
 }
 
