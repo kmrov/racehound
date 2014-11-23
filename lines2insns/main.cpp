@@ -125,6 +125,14 @@ is_kernel_image()
 static string kmodule_path;
 /* ====================================================================== */
 
+/* Same as strstarts() from the kernel. */
+static bool 
+starts_with(const char *str, const char *prefix)
+{
+	return strncmp(str, prefix, strlen(prefix)) == 0;
+}
+/* ====================================================================== */
+
 static void
 show_usage()
 {
@@ -153,8 +161,7 @@ extract_kmodule_name()
 	string kmodule_file = basename(str);
 	free(str);
 	
-	if (kmodule_file.compare(0, kernel_image.size(), 
-				 kernel_image) == 0) {
+	if (starts_with(kmodule_file.c_str(), kernel_image.c_str())) {
 		/* A kernel image. */
 		return true;
 	}
@@ -306,6 +313,53 @@ public:
 };
 /* ====================================================================== */
 
+enum EAccessType {
+	AT_NONE = 0, /* means "not specified" */
+	AT_READ,
+	AT_WRITE
+};
+
+struct InsnInfo
+{
+	/* Offset of the instruction in the section it belongs to. */
+	unsigned int offset;
+	
+	/* The access type of interest. */
+	EAccessType atype;
+	
+	friend bool operator<(const InsnInfo &left, const InsnInfo &right)
+	{
+		if (left.offset < right.offset)
+			return true;
+		
+		if (left.offset == right.offset && left.atype < right.atype)
+			return true;
+		
+		return false;
+	}
+};
+
+/* Instruction locations in the given ELF section and other data for that
+ * section. */
+struct SectionInfo
+{
+	/* Start offset of this section in the area ('init' or 'core') it 
+	 * belongs to. */
+	unsigned int start_offset;
+	
+	/* true if the section belongs to 'init' area, false otherwise. */
+	bool belongs_to_init;
+	
+	/* The instructions in this section corresponding to the input 
+	 * source lines. */
+	set<InsnInfo> insns;
+};
+
+/* map: section_index => section_info */
+typedef map<unsigned int, SectionInfo> TSectionMap;
+static TSectionMap sections;
+/* ====================================================================== */
+
 static void
 process_elf_file(DwflWrapper &wr_dwfl,
 		 void (*func)(DwflWrapper &, Elf *, int /* fd */))
@@ -390,55 +444,100 @@ load_dwarf_info(DwflWrapper &wr_dwfl, Elf * /* unused */, int fd)
 			"No relocations - is section info valid?"));
 	}
 }
-/* ====================================================================== */
 
-enum EAccessType {
-	AT_NONE = 0, /* means "not specified" */
-	AT_READ,
-	AT_WRITE
-};
-
-struct InsnInfo
+static void
+process_elf_sections(DwflWrapper & /* unused */, Elf *e, int /* unused */)
 {
-	/* Offset of the instruction in the section it belongs to. */
-	unsigned int offset;
+	size_t sh_str_index;
+	Elf_Scn *scn;
+	size_t idx;
+	GElf_Shdr shdr;
+	char *name;
 	
-	/* The access type of interest. */
-	EAccessType atype;
+	if (sections.empty())
+		return; /* No sections to look for, nothing to do. */
 	
-	friend bool operator<(const InsnInfo &left, const InsnInfo &right)
-	{
-		if (left.offset < right.offset)
-			return true;
-		
-		if (left.offset == right.offset && left.atype < right.atype)
-			return true;
-		
-		return false;
+	if (elf_getshdrstrndx(e, &sh_str_index) != 0) {
+		ostringstream err;
+		err << "elf_getshdrstrndx() failed: " << elf_errmsg(-1);
+		throw runtime_error(err.str());
 	}
-};
-
-
-
-/* Instruction locations in the given ELF section and other data for that
- * section. */
-struct SectionInfo
-{
-	/* Start offset of this section in the area ('init' or 'core') it 
-	 * belongs to. */
-	unsigned int start_offset;
 	
-	/* true if the section belongs to 'init' area, false otherwise. */
-	bool belongs_to_init;
-	
-	/* The instructions in this section corresponding to the input 
-	 * source lines. */
-	set<InsnInfo> insns;
-};
+	unsigned long mask = SHF_ALLOC | SHF_EXECINSTR;
+	TSectionMap::iterator it = sections.begin();
+	unsigned int init_offset = 0;
+	unsigned int core_offset = 0;
 
-/* map: section_index => section_info */
-typedef map<unsigned int, SectionInfo> TSectionMap;
-static TSectionMap sections;
+	scn = NULL;
+	while ((scn = elf_nextscn(e, scn)) != NULL && it != sections.end()) {
+		if (gelf_getshdr(scn, &shdr) != &shdr) {
+			ostringstream err;
+			err << "Failed to retrieve section header: "
+				<< elf_errmsg(-1);
+			throw runtime_error(err.str());
+		}
+		
+		name = elf_strptr(e, sh_str_index, shdr.sh_name);
+		if (name == NULL) {
+			ostringstream err;
+			err << "Failed to retrieve section name: "
+				<< elf_errmsg(-1);
+			throw runtime_error(err.str());
+		}
+		
+		if ((shdr.sh_flags & mask) != mask)
+			continue;
+		
+		idx = elf_ndxscn(scn);
+		bool is_init = starts_with(name, ".init");
+				
+		if (idx == it->first) {
+			if (verbose) {
+				cerr << "Setting the offset for section \""
+					<< name << "\" (#" << idx << "), "
+					<< (is_init ? "'init'" : "'core'")
+					<< " area." << endl;
+			}
+			SectionInfo &si = it->second;
+			if (is_init) { /* 'init' area */
+				si.belongs_to_init = true;
+				si.start_offset = init_offset;
+			}
+			else { /* 'core' area */
+				si.start_offset = core_offset;
+			}
+
+			/* Filter the insns */
+			// TODO: do the filtering here while we have the 
+			// handle to the ELF section.
+// TODO: decode the insns in the sections, filter out the insns that do not access memory (remove them from the sets)
+// TODO: if requested, filter out %esp/%rsp-based accesses and locked ops.
+			++it;
+		}
+		else {
+			if (verbose) {
+				cerr << 
+		"No instructions of interest in section \"" <<
+					name << "\", skipping." << endl;
+			}
+		}
+		
+		if (is_init) {
+			init_offset += (unsigned int)shdr.sh_size;
+		}
+		else {
+			core_offset += (unsigned int)shdr.sh_size;
+		}
+	}
+	
+	if (it != sections.end()) {
+		ostringstream err;
+			err << 
+		"Failed to find info for the sections starting from #"
+				<< it->first << endl;
+			throw runtime_error(err.str());
+	}
+}
 /* ====================================================================== */
 
 static void
@@ -614,12 +713,8 @@ main(int argc, char *argv[])
 		}
 		
 		/* Find which area each section belongs to and what offset
-		 * the section has there. */
-		// TODO: find which area each section belongs to, find the start offset of the section
-
-		/* Filter the insns */
-		// TODO: decode the insns in the sections, filter out the insns that do not access memory (remove them from the sets)
-		// TODO: if requested, filter out %esp/%rsp-based accesses and locked ops.
+		 * the section has there. Filter the insns. */
+		process_elf_file(wr_dwfl, process_elf_sections);
 		
 		/* Output the results, sorted by offset, init area first. */
 		TSectionMap::iterator it;
