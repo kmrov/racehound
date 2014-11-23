@@ -57,12 +57,12 @@
  "corresponding to these locations that may access memory to stdout.\n\n" \
  "" \
  "Each input line must have the following format:\n\n" \
- "<path_to_source_file>:<line_no>:<column_no>[:{read|write}]\n\n" \
+ "<path_to_source_file>:<line_no>[:{read|write}]\n\n" \
  "" \
  "Examples:\n\n" \
- "examples/sample_target/cfake.c:173:20:read\n" \
- "test.c:144:2\n" \
- "test2/test2.c:55:6:write\n\n" \
+ "examples/sample_target/cfake.c:173:read\n" \
+ "test.c:144\n" \
+ "test2/test2.c:55:write\n\n" \
  "" \
  APP_NAME " reads the list of sections and debug info from the given\n" \
  "<module_file_with_debug_info> (it may be *.ko file for a kernel module\n" \
@@ -73,15 +73,17 @@
  "[<module>:]{init|core}+0xoffset\n\n" \
  "" \
  "'init' and 'core' are the two main areas of the loaded kernel or\n" \
- "module. 'core' contains all *.text* sections, without gaps, in the\n" \
- "order they appear in the ELF file (*.ko or vmlinu*). 'init' contains\n" \
- "all *.init.text* sections, also in that order.\n\n" \
- "If the given file is a module, its name (without .ko) followed by\n" \
- "a colon will be output first. No such prefix will be output for the\n" \
+ "module. 'core' contains all code sections, without gaps, in the\n" \
+ "order they appear in the ELF file (*.ko or vmlinu*) except *.init.text*\n" \
+ "sections, which belong to 'init' area and go in order too.\n\n" \
+ "" \
+ "If the given file is a module, its name without .ko followed by\n" \
+ "a colon (with '-' characters replaced by underscores like the kernel\n" \
+ "does) will be output first. No such prefix will be output for the\n" \
  "kernel proper or the built-in modules.\n\n" \
  "" \
  "Example:\n\n" \
- "$ echo 'my_driver/main.c:126:16' | " APP_NAME " my_driver.ko\n" \
+ "$ echo 'my-driver/main.c:126' | " APP_NAME " my-driver.ko\n" \
  "my_driver:core+0x568\n" \
  "my_driver:core+0x575\n\n" \
  "" \
