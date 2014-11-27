@@ -489,6 +489,7 @@ expr_uses_sp(struct insn *insn)
     unsigned int expr_reg_mask = insn_reg_mask_for_expr(insn);
     return (expr_reg_mask & X86_REG_MASK(INAT_REG_CODE_SP));
 }
+/* ====================================================================== */
 
 #ifdef __cplusplus
 }

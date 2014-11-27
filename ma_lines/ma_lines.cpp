@@ -15,6 +15,8 @@
 #include <fstream>
 #include <string>
 #include <set>
+
+#include <common/util.h>
 /* ====================================================================== */
 
 #if BUILDING_GCC_VERSION <= 4008
@@ -92,15 +94,8 @@ static std::set<std::string> special_functions(
 	&_funcs[0], &_funcs[0] + sizeof(_funcs) / sizeof(_funcs[0]));
 /* ====================================================================== */
 
-enum EMemoryAccess {
-	MA_READ=0, /* read operation */
-	MA_WRITE,  /* write operation */
-	MA_ANY     /* any operation */
-	/* [NB] A greater value will be treated the same way as MA_ANY. */
-};
-
 static void
-output_ma_location(gimple stmt, EMemoryAccess ma_type)
+output_ma_location(gimple stmt, EAccessType ma_type)
 {
 	int ret;
 	
@@ -150,13 +145,13 @@ output_ma_location(gimple stmt, EMemoryAccess ma_type)
 	}
 	
 	fprintf(out, "%s:%u", src, line);
-	if (ma_type == MA_READ) {
+	if (ma_type == AT_READ) {
 		fprintf(out, ":read\n");
 	}
-	else if (ma_type == MA_WRITE) {
+	else if (ma_type == AT_WRITE) {
 		fprintf(out, ":write\n");
 	}
-	else /* MA_ANY and all other values */ {
+	else /* AT_BOTH and all other values */ {
 		fprintf(out, "\n");
 	}
 
@@ -186,7 +181,7 @@ process_function_call(gimple_stmt_iterator *gsi)
 
 	const char *name = IDENTIFIER_POINTER(DECL_NAME(fndecl));
 	if (special_functions.find(name) != special_functions.end()) {
-		output_ma_location(stmt, MA_ANY);
+		output_ma_location(stmt, AT_BOTH);
 	}
 }
 
@@ -249,7 +244,7 @@ process_expr(gimple_stmt_iterator gsi, tree expr, bool is_write)
 		return;
 	}
 
-	output_ma_location(stmt, (is_write ? MA_WRITE : MA_READ));
+	output_ma_location(stmt, (is_write ? AT_WRITE : AT_READ));
 }
 
 static void
