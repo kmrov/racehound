@@ -5,8 +5,8 @@ enable_language(CXX)
 #######################################################################
 
 include_directories(
-	"${ARCH_SOURCE_DIR}/include"
-	"${ARCH_BINARY_DIR}/lib"
+	"${CMAKE_SOURCE_DIR}"
+	"${CMAKE_BINARY_DIR}"
 	"${CMAKE_CURRENT_SOURCE_DIR}"
 	"${CMAKE_CURRENT_BINARY_DIR}"
 )
@@ -21,8 +21,10 @@ configure_file(
 
 set(APP_SOURCES
 	"main.cpp"
-	"${ARCH_SOURCE_DIR}/lib/inat.c"
-	"${ARCH_SOURCE_DIR}/lib/insn.c"
+	"${COMMON_SOURCE_DIR}/inat.c"
+	"${COMMON_SOURCE_DIR}/insn.c"
+	"${COMMON_SOURCE_DIR}/util.c"
+	"${COMMON_SOURCE_DIR}/util.h"
 
 	"${CMAKE_CURRENT_BINARY_DIR}/config_${APP_NAME}.h"
 )

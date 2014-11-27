@@ -21,8 +21,6 @@
 #include <linux/jiffies.h>
 #include <linux/percpu.h>
 
-#include <kedr/asm/insn.h>
-
 #include <linux/smp.h>
 #include <linux/sched.h>
 #include <linux/kdebug.h>
@@ -42,6 +40,9 @@
 #include <linux/kref.h>
 #include <linux/uaccess.h>
 #include <linux/preempt.h>
+
+#include <common/insn.h>
+#include <common/util.h>
 
 #include "decoder.h"
 #include "functions.h"

@@ -5,8 +5,8 @@
  *
  * Written by Masami Hiramatsu <mhiramat@redhat.com>
  *
- * Handling of register usage information was implemented by 
- *  Eugene A. Shatokhin <spectre@ispras.ru>, 2011
+ * Handling of register usage information was implemented and other 
+ * modifications were made by Eugene A. Shatokhin, 2011-2014
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -315,7 +315,9 @@ extern unsigned int insn_reg_mask(struct insn *insn);
  * expression (ModRM.RM, SIB) are considered. */
 extern unsigned int insn_reg_mask_for_expr(struct insn *insn);
 
-/* Query memory access type */
+/* Query memory access type for the instructions with MOD R/M. Note that 
+ * these functions do not apply to string insns, xlat, etc. */
+
 /* Nonzero if the instruction reads data from memory, 0 otherwise. 
  * The function decodes the relevant parts of the instruction if needed. */
 extern int insn_is_mem_read(struct insn *insn);
@@ -337,6 +339,156 @@ extern int insn_has_prefix(struct insn *insn, insn_byte_t prefix);
  * XCHG reg, mem and the instructions with LOCK prefix are considered 
  * locked operations */
 extern int insn_is_locked_op(struct insn *insn);
+
+/* Nonzero if the instruction has FS: or GS: prefix, 0 otherwise. */
+extern int insn_has_fs_gs_prefixes(struct insn *insn);
+
+/* Checks if the instruction has addressing method (type) E and its Mod R/M 
+ * expression refers to memory.
+ *
+ * [NB] CMPXCHG, SETcc, etc. also have type E and will be reported by this 
+ * function as such. To distinguish them from other type E instructions, use
+ * is_*_cmpxchg() and the like. */
+static inline int
+is_insn_type_e(struct insn *insn)
+{
+    insn_attr_t *attr = &insn->attr;
+    unsigned char modrm = insn->modrm.bytes[0];
+    
+    return ((attr->addr_method1 == INAT_AMETHOD_E || 
+        attr->addr_method2 == INAT_AMETHOD_E) &&
+        X86_MODRM_MOD(modrm) != 3);
+}
+
+static inline int
+is_insn_xlat(struct insn *insn)
+{
+    unsigned char *opcode = insn->opcode.bytes;
+    
+    /* XLAT: D7 */
+    return (opcode[0] == 0xd7);
+}
+
+static inline int
+is_insn_direct_offset_mov(struct insn *insn)
+{
+    unsigned char *opcode = insn->opcode.bytes;
+    
+    /* Direct memory offset MOVs: A0-A3 */
+    return (opcode[0] >= 0xa0 && opcode[0] <= 0xa3);
+}
+
+/* Opcode: FF/2 */
+static inline int
+is_insn_call_near_indirect(struct insn *insn)
+{
+    return (insn->opcode.bytes[0] == 0xff && 
+        X86_MODRM_REG(insn->modrm.bytes[0]) == 2);
+}
+
+/* Opcode: FF/4 */
+static inline int
+is_insn_jump_near_indirect(struct insn *insn)
+{
+    return (insn->opcode.bytes[0] == 0xff && 
+        X86_MODRM_REG(insn->modrm.bytes[0]) == 4);
+}
+
+/* Opcodes: FF/3 or 9A */
+static inline int
+is_insn_call_far(struct insn *insn)
+{
+    unsigned char opcode = insn->opcode.bytes[0];
+    unsigned char modrm = insn->modrm.bytes[0];
+    
+    return (opcode == 0x9a || 
+        (opcode == 0xff && X86_MODRM_REG(modrm) == 3));
+}
+
+/* Opcodes: FF/5 or EA */
+static inline int
+is_insn_jump_far(struct insn *insn)
+{
+    unsigned char opcode = insn->opcode.bytes[0];
+    unsigned char modrm = insn->modrm.bytes[0];
+    
+    return (opcode == 0xea || 
+        (opcode == 0xff && X86_MODRM_REG(modrm) == 5));
+}
+
+static inline int
+is_insn_cmpxchg8b_16b(struct insn *insn)
+{
+    unsigned char *opcode = insn->opcode.bytes;
+    unsigned char modrm = insn->modrm.bytes[0];
+    
+    /* CMPXCHG8B/CMPXCHG16B: 0F C7 /1 */
+    return (opcode[0] == 0x0f && opcode[1] == 0xc7 &&
+        X86_MODRM_REG(modrm) == 1);
+}
+
+static inline int
+is_insn_cmpxchg(struct insn *insn)
+{
+    unsigned char *opcode = insn->opcode.bytes;
+    unsigned char modrm = insn->modrm.bytes[0];
+
+    /* CMPXCHG: 0F B0 and 0F B1 */
+    return (opcode[0] == 0x0f && 
+        (opcode[1] == 0xb0 || opcode[1] == 0xb1) && 
+        X86_MODRM_MOD(modrm) != 3);
+}
+
+static inline int
+is_insn_type_x(struct insn *insn)
+{
+    insn_attr_t *attr = &insn->attr;
+    return (attr->addr_method1 == INAT_AMETHOD_X ||
+        attr->addr_method2 == INAT_AMETHOD_X);
+}
+
+static inline int
+is_insn_type_y(struct insn *insn)
+{
+    insn_attr_t *attr = &insn->attr;
+    return (attr->addr_method1 == INAT_AMETHOD_Y || 
+        attr->addr_method2 == INAT_AMETHOD_Y);
+}
+
+static inline int
+is_insn_movbe(struct insn *insn)
+{
+    unsigned char *opcode = insn->opcode.bytes;
+    
+    /* We need to check the prefix to distinguish MOVBE from CRC32 insn,
+     * they have the same opcode. */
+    if (insn_has_prefix(insn, 0xf2))
+        return 0;
+    
+    /* MOVBE: 0F 38 F0 and 0F 38 F1 */
+    return (opcode[0] == 0x0f && opcode[1] == 0x38 &&
+        (opcode[2] == 0xf0 || opcode[2] == 0xf1));
+}
+
+static inline int
+is_insn_cmovcc(struct insn *insn)
+{
+    unsigned char *opcode = insn->opcode.bytes;
+    unsigned char modrm = insn->modrm.bytes[0];
+    
+    /* CMOVcc: 0F 40 - 0F 4F */
+    return (opcode[0] == 0x0f && 
+        ((opcode[1] & 0xf0) == 0x40) &&
+        X86_MODRM_MOD(modrm) != 3);
+}
+
+/* Check if the memory addressing expression uses %rsp/%esp. */
+static inline int
+expr_uses_sp(struct insn *insn)
+{
+    unsigned int expr_reg_mask = insn_reg_mask_for_expr(insn);
+    return (expr_reg_mask & X86_REG_MASK(INAT_REG_CODE_SP));
+}
 
 #ifdef __cplusplus
 }

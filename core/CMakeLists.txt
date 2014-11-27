@@ -1,8 +1,8 @@
 set(kmodule_name "race_hound")
 
 kbuild_include_directories(
-	"${ARCH_SOURCE_DIR}/include"
-	"${ARCH_BINARY_DIR}/lib"
+	"${CMAKE_SOURCE_DIR}"
+	"${CMAKE_BINARY_DIR}"
 	"${CMAKE_CURRENT_SOURCE_DIR}"
 )
 
@@ -11,15 +11,13 @@ kbuild_add_module(${kmodule_name}
 	"functions.c"
 	"decoder.c"
 	"wrapper.S"
-
-# Only for dependencies	
 	"functions.h"
 	"decoder.h"
 
-# Arch-dependent sources and headers
-	"${ARCH_SOURCE_DIR}/lib/inat.c"
-	"${ARCH_SOURCE_DIR}/lib/insn.c"
-	"${ARCH_BINARY_DIR}/lib/inat-tables.h"
+	"${COMMON_SOURCE_DIR}/inat.c"
+	"${COMMON_SOURCE_DIR}/insn.c"
+	"${COMMON_SOURCE_DIR}/util.c"
+	"${COMMON_SOURCE_DIR}/util.h"
 )
 
 add_dependencies(${kmodule_name} insn_decoder_headers)

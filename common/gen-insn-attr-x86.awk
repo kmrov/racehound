@@ -2,8 +2,8 @@
 # gen-insn-attr-x86.awk: Instruction attribute table generator
 # Written by Masami Hiramatsu <mhiramat@redhat.com>
 #
-# Handling of register usage information was implemented by 
-#   Eugene A. Shatokhin <spectre@ispras.ru>, 2011
+# Handling of register usage information was implemented and other 
+# modifications were made by Eugene A. Shatokhin, 2011-2014
 #
 # Usage: awk -f gen-insn-attr-x86.awk x86-opcode-map.txt > inat-tables.c
 

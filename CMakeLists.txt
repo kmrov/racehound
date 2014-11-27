@@ -28,26 +28,22 @@ set(RH_PACKAGE_VERSION
 )
 #######################################################################
 
-# The definitions for the instruction decoder.
-set(arch "x86")
-set(arch_dir "arch/${arch}")
-set(ARCH_SOURCE_DIR "${CMAKE_SOURCE_DIR}/${arch_dir}")
-set(ARCH_BINARY_DIR "${CMAKE_BINARY_DIR}/${arch_dir}")
+set(COMMON_SOURCE_DIR "${CMAKE_SOURCE_DIR}/common")
+set(COMMON_BINARY_DIR "${CMAKE_BINARY_DIR}/common")
 
-file(MAKE_DIRECTORY ${ARCH_BINARY_DIR}/lib)
+file(MAKE_DIRECTORY "${COMMON_BINARY_DIR}")
 
 # This is needed for CMakeLists.txt from other directories could also refer
 # to inat-tables.h via this target.
-
 add_custom_target(insn_decoder_headers
-	DEPENDS "${ARCH_BINARY_DIR}/lib/inat-tables.h"
+	DEPENDS "${COMMON_BINARY_DIR}/inat-tables.h"
 )
 
-add_custom_command(OUTPUT "${ARCH_BINARY_DIR}/lib/inat-tables.h"
-	COMMAND LC_ALL=C awk -f "${ARCH_SOURCE_DIR}/tools/gen-insn-attr-x86.awk"
-		"${ARCH_SOURCE_DIR}/lib/x86-opcode-map.txt" >
-		"${ARCH_BINARY_DIR}/lib/inat-tables.h"
-	DEPENDS "${ARCH_SOURCE_DIR}/lib/x86-opcode-map.txt"
+add_custom_command(OUTPUT "${COMMON_BINARY_DIR}/inat-tables.h"
+	COMMAND LC_ALL=C awk -f "${COMMON_SOURCE_DIR}/gen-insn-attr-x86.awk"
+		"${COMMON_SOURCE_DIR}/x86-opcode-map.txt" >
+		"${COMMON_BINARY_DIR}/inat-tables.h"
+	DEPENDS "${COMMON_SOURCE_DIR}/x86-opcode-map.txt"
 )
 #######################################################################
 

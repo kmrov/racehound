@@ -30,10 +30,10 @@
 #  include <string.h>
 #endif
 
-#include <kedr/asm/insn.h>
+#include <common/insn.h>
 
 /* Attribute tables are generated from opcode map */
-#include "inat-tables.h"
+#include <common/inat-tables.h>
 
 void
 inat_zero_insn_attr(insn_attr_t *attr)

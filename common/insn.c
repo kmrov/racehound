@@ -3,8 +3,8 @@
  *
  * Written by Masami Hiramatsu <mhiramat@redhat.com>
  *
- * Handling of register usage information was implemented by 
- *  Eugene A. Shatokhin <spectre@ispras.ru>, 2011
+ * Handling of register usage information was implemented and other 
+ * modifications were made by Eugene A. Shatokhin, 2011-2014
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -31,8 +31,8 @@
 #  include <string.h>
 #endif
 
-#include <kedr/asm/inat.h>
-#include <kedr/asm/insn.h>
+#include <common/inat.h>
+#include <common/insn.h>
 
 #define get_next(t, insn)	\
 	({t r; r = *(t*)insn->next_byte; insn->next_byte += sizeof(t); r; })
@@ -1318,4 +1318,20 @@ insn_is_locked_op(struct insn *insn)
 	
 	return (insn_has_prefix(insn, 0xf0) ||
 		((opcode == 0x86 || opcode == 0x87) && mod != 3));
+}
+
+int 
+insn_has_fs_gs_prefixes(struct insn *insn)
+{
+    int i;
+    insn_byte_t *prefixes = insn->prefixes.bytes;
+    insn_get_prefixes(insn);
+    for (i = 0; i < X86_NUM_LEGACY_PREFIXES; i++)
+    {
+        if (prefixes[i] == 0x64 || prefixes[i] == 0x65)
+        {
+            return 1;
+        }
+    }
+    return 0;
 }
