@@ -315,8 +315,9 @@ extern unsigned int insn_reg_mask(struct insn *insn);
  * expression (ModRM.RM, SIB) are considered. */
 extern unsigned int insn_reg_mask_for_expr(struct insn *insn);
 
-/* Query memory access type for the instructions with MOD R/M. Note that 
- * these functions do not apply to string insns, xlat, etc. */
+/* Query memory access type for the instructions. 
+ * Note that these functions *do* apply to string insns, xlat, etc., rather
+ * than only to the insns with Mod R/M. */
 
 /* Nonzero if the instruction reads data from memory, 0 otherwise. 
  * The function decodes the relevant parts of the instruction if needed. */
@@ -484,7 +485,7 @@ is_insn_cmovcc(struct insn *insn)
 
 /* Check if the memory addressing expression uses %rsp/%esp. */
 static inline int
-expr_uses_sp(struct insn *insn)
+insn_is_sp_based_access(struct insn *insn)
 {
     unsigned int expr_reg_mask = insn_reg_mask_for_expr(insn);
     return (expr_reg_mask & X86_REG_MASK(INAT_REG_CODE_SP));
