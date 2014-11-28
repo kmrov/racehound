@@ -742,8 +742,8 @@ df: aesdeclast Vdq,Wdq (66),(VEX),(o128)
 # "Mem: R" is specified for CRC32 instructions. 
 # It should be set separately that MOVBE mem->reg actually writes 
 # to memory rather than reads from it.
-f0: MOVBE Gv,Mv | CRC32 Gd,Eb (F2)	Mem: R
-f1: MOVBE Mv,Gv | CRC32 Gd,Ev (F2)	Mem: R
+f0: MOVBE Gv,Mv	Mem: R | CRC32 Gd,Eb (F2)	Mem: R
+f1: MOVBE Mv,Gv	Mem: W | CRC32 Gd,Ev (F2)	Mem: R
 EndTable
 
 Table: 3-byte opcode 2 (0x0f 0x3a)
