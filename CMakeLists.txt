@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 2.6)
+cmake_minimum_required(VERSION 2.8.10)
 
 enable_language(C)
 enable_language(CXX)
@@ -152,33 +152,101 @@ check_kernel_config()
 
 # The kernel-space part of the system
 add_subdirectory(core)
+#######################################################################
 
-# Build the GCC plugin only if GCC is used as the compiler.
-if (CMAKE_COMPILER_IS_GNUCC)
-	# TODO: Check if GCC's version is 4.8 or newer, also check if GCC 
-	# supports plugins (ask for plugin directory?). If these conditions
-	# are not met, warn and do not build "ma_lines" plugin.
+include(CheckCXXCompilerFlag)
 
-	# This GCC plugin can be used when compiling the sources of the 
-	# kernel and the modules to output the source lines (file:line or 
-	# so) where memory accesses happen, hence "ma_" in the name.
-	add_subdirectory(ma_lines)
-else ()
-	message(WARNING 
-	"GCC plugin \"ma_lines\" can only be built with GCC, skipping.")
-endif ()
+set(CPP11_COMPILER_FLAG "")
+CHECK_CXX_COMPILER_FLAG("-std=c++11" COMPILER_SUPPORTS_CXX11)
+CHECK_CXX_COMPILER_FLAG("-std=c++0x" COMPILER_SUPPORTS_CXX0X)
 
-# Check if the development files for libelf and libdw are available.
-check_libelf_devel()
-check_libdw_devel()
+if(COMPILER_SUPPORTS_CXX11)
+	set(CPP11_COMPILER_FLAG "-std=c++11")
+elseif(COMPILER_SUPPORTS_CXX0X)
+	set(CPP11_COMPILER_FLAG "-std=c++0x")
+else()
+        message(STATUS 
+"The compiler ${CMAKE_CXX_COMPILER} has no C++11 support.")
+endif()
+#######################################################################
 
-# This tool takes the list of source lines (e.g., collected by "ma_lines"
-# plugin) as well as the binary file with debug info and outputs the 
-# locations of instructions corresponding to those lines, filtered as 
-# necessary.
-# Format: [module_name:](init|core)+0xoffset, one record per line.
-# TODO: Implement the app.
-add_subdirectory(lines2insns)
+option(BUILD_MA_LINES_PLUGIN
+	"Build \"ma_lines\" GCC plugin." 
+	ON
+)
+
+if (BUILD_MA_LINES_PLUGIN)
+	set(do_build_ma_lines TRUE)
+	
+	# Build the GCC plugin only if GCC is used as the compiler.
+	if (NOT CMAKE_COMPILER_IS_GNUCC OR
+	    CMAKE_C_COMPILER_VERSION VERSION_LESS 4.8)
+		message(WARNING 
+		"\"ma_lines\" plugin requires GCC 4.8 or newer, skipping.")
+		set(do_build_ma_lines FALSE)
+	else ()
+		# Find the directory with the header files for GCC plugins
+		execute_process (
+			COMMAND ${CMAKE_C_COMPILER} -print-file-name=plugin
+			OUTPUT_VARIABLE plugin_dir
+			OUTPUT_STRIP_TRAILING_WHITESPACE
+		)
+		if (NOT plugin_dir OR 
+		    plugin_dir STREQUAL "plugin")
+			message(WARNING 
+"GCC plugin directory is missing on this system. "
+"Please check if the packages GCC needs to support plugins are installed.")
+			set(do_build_ma_lines FALSE)
+		else ()
+			# Check if include/gcc-plugin.h exists there.
+			find_file(gcc_plugin_h_file
+				"gcc-plugin.h"
+				PATHS "${plugin_dir}/include"
+				NO_DEFAULT_PATH)
+			if (NOT gcc_plugin_h_file)
+				message(WARNING 
+"<include/gcc-plugin.h> header is missing on this system. "
+"Please check if the packages GCC needs to support plugins are installed.")
+			set(do_build_ma_lines FALSE)
+			endif()
+		endif ()
+	endif()
+	if (do_build_ma_lines)
+		# This GCC plugin can be used when compiling the sources of 
+		# the kernel and the modules. It outputs the source lines 
+		# (file:line or so) where memory accesses happen, hence 
+		# "ma_" in the name.
+		add_subdirectory(ma_lines)
+	else()
+		message (STATUS 
+"Not building \"ma_lines\": it requires GCC 4.8 or newer with plugin support.")
+	endif()
+endif () # BUILD_MA_LINES_PLUGIN
+#######################################################################
+
+option(BUILD_LINES2INSNS
+	"Build \"lines2insns\" tool" 
+	ON
+)
+
+if (BUILD_LINES2INSNS)
+	# Check if the development files for libelf and libdw are available.
+	check_libelf_devel()
+	check_libdw_devel()
+
+	if (CPP11_COMPILER_FLAG)
+		# This tool takes the list of source lines (e.g., collected
+		# by "ma_lines" plugin) as well as the binary file with 
+		# debug info and outputs the locations of instructions 
+		# corresponding to those lines, filtered as necessary. These
+		# data can than be fed to the kernel part of RaceHound to 
+		# track the appropriate memory accesses.
+		add_subdirectory(lines2insns)
+	else ()
+		message (WARNING 
+"Not building \"lines2insns\": it requires a compiler that supports C++11.")
+	endif ()
+endif()
 #######################################################################
 
 configure_file("${CMAKE_SOURCE_DIR}/config.h.in" 

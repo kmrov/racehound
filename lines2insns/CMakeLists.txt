@@ -37,7 +37,7 @@ set_target_properties(${APP_NAME} PROPERTIES
 )
 
 set_source_files_properties("main.cpp" PROPERTIES
-	COMPILE_FLAGS "--std=c++11"
+	COMPILE_FLAGS ${CPP11_COMPILER_FLAG}
 )
 
 target_link_libraries(${APP_NAME} "elf" "dw")
