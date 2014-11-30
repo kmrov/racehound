@@ -3,7 +3,7 @@
  * 
  * See 'lines2insns --help' for usage details. */
 /* ========================================================================
- * Copyright (C) 2014, NTC IT ROSA
+ * Copyright (C) 2014, ROSA Laboratory
  *
  * Author: 
  *      Eugene A. Shatokhin
@@ -39,7 +39,8 @@
 #include <dwarf.h>
 #include <elfutils/libdwfl.h>
 
-#include <kedr/asm/insn.h>
+#include <common/insn.h>
+#include <common/util.h>
 
 #include "config_lines2insns.h"
 /* ====================================================================== */
@@ -100,6 +101,10 @@
  "By default, locked operations are not output. This option tells\n\t" \
  APP_NAME " to output such instructions too.\n" \
  "" \
+ "--no-filter\n\t" \
+ "Output all found instructions, without filtering. Debugging feature.\n\t" \
+ "Among other things, this overrides '--with-stack' and '--with-locked'.\n" \
+ "" \
  "-v, --verbose\n\t" \
  "Output more messages to stderr about what is being done.\n"
 /* ====================================================================== */
@@ -111,6 +116,11 @@ using namespace std;
 static bool with_stack = false;
 static bool with_locked = false;
 static bool verbose = false;
+static bool no_filter = false;
+
+/* 1 if the module is built for x86-64, 0 otherwise (32-bit x86, because 
+ * only x86 architecture is currently supported here). */
+static int is_module_x64 = 0;
 
 /* Name of the kernel module (the part before .ko), empty for the kernel
  * proper (vmlinu*). */
@@ -198,6 +208,7 @@ process_args(int argc, char *argv[])
 		{"help", no_argument, NULL, 'h'},
 		{"with-stack", no_argument, NULL, 's'},
 		{"with-locked", no_argument, NULL, 'l'},
+		{"no-filter", no_argument, NULL, 'n'},
 		{"verbose", no_argument, NULL, 'v'},
 		{NULL, 0, NULL, 0}
 	};
@@ -220,6 +231,9 @@ process_args(int argc, char *argv[])
 			break;
 		case 'l':
 			with_locked = true;
+			break;
+		case 'n':
+			no_filter = true;
 			break;
 		case 'v':
 			verbose = true;
@@ -312,12 +326,6 @@ public:
 	}
 };
 /* ====================================================================== */
-
-enum EAccessType {
-	AT_NONE = 0, /* means "not specified" */
-	AT_READ,
-	AT_WRITE
-};
 
 struct InsnInfo
 {
@@ -444,6 +452,124 @@ load_dwarf_info(DwflWrapper &wr_dwfl, Elf * /* unused */, int fd)
 			"No relocations - is section info valid?"));
 	}
 }
+/* ====================================================================== */
+
+static void
+process_insn(SectionInfo &si, set<InsnInfo>::iterator &it, struct insn *insn, 
+	     const char *sec_name)
+{
+	if (no_filter) {
+		++it;
+		return;
+	}
+	
+	EAccessType at = AT_BOTH;
+	if (!is_tracked_memory_access(insn, &at, with_stack, with_locked)) {
+		if (verbose) {
+			cerr << "Removing the instruction at " << sec_name 
+				<< "+0x" << hex << it->offset << dec <<
+	" from the set: no memory accesses or they should not be processed."
+				<< endl;
+		}
+		it = si.insns.erase(it);
+		return;
+	}	
+	else if ((it->atype == AT_READ && at == AT_WRITE) || 
+		 (it->atype == AT_WRITE && at == AT_READ)) {
+		if (verbose) {
+			cerr << 
+			"Mismatching access types for the instruction at " 
+				<< sec_name 
+				<< "+0x" << hex << it->offset << dec 
+				<< ", removing it from the set." << endl;
+		}
+		it = si.insns.erase(it);
+		return;
+	}
+	
+	++it;
+	return;
+}
+
+/* Decode and filter the instructions in the area 
+ * [data->d_off, data->d_off + data->d_size). */
+static void
+decode_and_filter(SectionInfo &si, set<InsnInfo>::iterator &it, 
+		  Elf_Data *data, const char *sec_name)
+{
+	unsigned int offset = (unsigned int)data->d_off;
+	struct insn insn;
+	unsigned char *start_addr = (unsigned char *)data->d_buf;
+	unsigned char *end_addr = start_addr + data->d_size;
+	
+	while (start_addr < end_addr && it != si.insns.end()) {
+		if (it->offset < offset) {
+			ostringstream err;
+			err << "Failed to find the instruction at "
+				<< sec_name << "+0x" << hex
+				<< it->offset << dec 
+				<< " in the binary file.";
+			throw runtime_error(err.str());
+		}
+		
+		insn_init(&insn, start_addr, is_module_x64);
+		insn_get_length(&insn);  /* Decode the instruction */
+		if (insn.length == 0) {
+			ostringstream err;
+			err << "Failed to decode the instruction at " 
+				<< sec_name 
+				<< "+0x" << hex << offset << dec 
+				<< " in the binary file.";
+			throw runtime_error(err.str());
+		}
+		
+		/* Some insns may have the same offset but different 
+		 * access types. */
+		while (it->offset == offset && it != si.insns.end())
+			process_insn(si, it, &insn, sec_name);
+		
+		start_addr += insn.length;
+		offset += insn.length;
+	}
+}
+
+/* Check the instructions selected so far in the given ELF sections and
+ * filter out (remove from si.insns) those that should not be processed:
+ * - the instructions that do not actually access memory;
+ * - (if requested) %esp/%rsp-based accesses;
+ * - (if requested) locked operations. */
+static void
+filter_insns(SectionInfo &si, Elf_Scn *scn, const char *sec_name)
+{
+	assert(scn != NULL);
+	
+	if (si.insns.empty())
+		return; 
+
+	Elf_Data *data;
+	
+	/* Points to the current insn to be checked. set<> makes sure the
+	 * elements are sorted and walked through in non-descending order of
+	 * the offsets in the section. */
+	set<InsnInfo>::iterator it = si.insns.begin();
+	
+	/* Each section may have 0 or more data chunks (usually 1 for code 
+	 * sections but we should not rely on that), process them all. */
+	data = NULL;
+	while ((data = elf_getdata(scn, data)) != NULL && 
+		it != si.insns.end()) {
+		assert(data->d_buf != NULL);
+		decode_and_filter(si, it, data, sec_name);
+	}
+	
+	if (it != si.insns.end()) {
+		ostringstream err;
+		err << "Failed to find the instruction at " << sec_name
+			<< "+0x" << hex << it->offset << dec 
+			<< " in the binary file.";
+		throw runtime_error(err.str());
+	}
+}
 
 static void
 process_elf_sections(DwflWrapper & /* unused */, Elf *e, int /* unused */)
@@ -452,10 +578,40 @@ process_elf_sections(DwflWrapper & /* unused */, Elf *e, int /* unused */)
 	Elf_Scn *scn;
 	size_t idx;
 	GElf_Shdr shdr;
+	GElf_Ehdr ehdr;
 	char *name;
 	
 	if (sections.empty())
 		return; /* No sections to look for, nothing to do. */
+		
+	/* Find the architecture the module was built for. */
+	if (gelf_getehdr(e, &ehdr) == NULL) {
+		ostringstream err;
+		err << "gelf_getehdr() failed: " << elf_errmsg(-1);
+		throw runtime_error(err.str());
+	}
+	
+	if (ehdr.e_machine == EM_386) {
+		is_module_x64 = 0;
+		if (verbose) {
+		cerr << "Module is built for 32-bit x86 architecture." 
+			<< endl;
+		}
+	}
+	else if (ehdr.e_machine == EM_X86_64) {
+		is_module_x64 = 1;
+		if (verbose) {
+		cerr << "Module is built for 64-bit x86 architecture." 
+			<< endl;
+		}
+	}
+	else {
+		ostringstream err;
+		err << "The module is built for unsupported architecture: "
+		 << "e_machine is " << ehdr.e_machine 
+		 << " in the ELF header." << endl;
+		throw runtime_error(err.str());
+	}
 	
 	if (elf_getshdrstrndx(e, &sh_str_index) != 0) {
 		ostringstream err;
@@ -507,11 +663,7 @@ process_elf_sections(DwflWrapper & /* unused */, Elf *e, int /* unused */)
 				si.start_offset = core_offset;
 			}
 
-			/* Filter the insns */
-			// TODO: do the filtering here while we have the 
-			// handle to the ELF section.
-// TODO: decode the insns in the sections, filter out the insns that do not access memory (remove them from the sets)
-// TODO: if requested, filter out %esp/%rsp-based accesses and locked ops.
+			filter_insns(si, scn, name);
 			++it;
 		}
 		else {
@@ -612,7 +764,7 @@ find_insns(DwflWrapper &wr_dwfl, string src_file, int line, EAccessType at)
 		 * sec_idx - index of the section in the ELF file. */
 		InsnInfo ii = {
 			.offset = (unsigned int)addr,
-			.atype = at
+			.atype = at,
 		};
 		sections[(unsigned int)sec_idx].insns.insert(ii);
 	}
@@ -637,7 +789,7 @@ process_input_line(DwflWrapper &wr_dwfl, const string &str)
 		throw runtime_error(string("Invalid input line: ") + str);
 	}
 	
-	EAccessType at = AT_NONE;
+	EAccessType at = AT_BOTH;
 	string fpath = s.substr(0, pos);
 	string str_line;
 	
@@ -694,6 +846,7 @@ main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	
 	if (verbose) {
+		cerr << "Turn off filtering: " << no_filter << endl;
 		cerr << "With stack: " << with_stack << endl;
 		cerr << "With locked: " << with_locked << endl;
 		cerr << "Module path: " << kmodule_path << endl;

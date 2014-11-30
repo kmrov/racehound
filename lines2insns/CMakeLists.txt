@@ -36,6 +36,10 @@ set_target_properties(${APP_NAME} PROPERTIES
 	COMPILE_FLAGS "-Wall -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64"
 )
 
+set_source_files_properties("main.cpp" PROPERTIES
+	COMPILE_FLAGS "--std=c++11"
+)
+
 target_link_libraries(${APP_NAME} "elf" "dw")
 #######################################################################
 
