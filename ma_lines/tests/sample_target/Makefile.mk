@@ -10,5 +10,6 @@ ${module_name}.ko: cfake.c cfake.h
 
 clean:
 	$(MAKE) -C ${KBUILD_DIR} M=${PWD} clean
+	rm -f ma_lines_out.list
 
 .PHONY: all clean
