@@ -355,10 +355,15 @@ plugin_init(struct plugin_name_args *plugin_info,
 		return 1;
 	
 	pass_info.pass = make_my_pass();
-	pass_info.reference_pass_name = "ssa";
+	
+	/* For some reason, GCC does not allow to place this pass after 
+	 * "inline" IPA pass, complaining that the latter is not found.
+	 * So I place the new pass before pass_lower_eh_dispatch ("ehdisp") 
+	 * which is guaranteed to execute after all IPA passes. */
+	pass_info.reference_pass_name = "ehdisp";
 	/* consider only the 1st occasion of the reference pass */
 	pass_info.ref_pass_instance_number = 1;
-	pass_info.pos_op = PASS_POS_INSERT_AFTER;
+	pass_info.pos_op = PASS_POS_INSERT_BEFORE;
 	
 	if (plugin_info->argc > 0) {
 		struct plugin_argument *arg = &plugin_info->argv[0];
