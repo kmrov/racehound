@@ -298,8 +298,11 @@ class DwflWrapper
 public:	
 	/* An object to access DWARF info of the kernel module. */
 	Dwfl_Module *dwfl_mod;
-	int nrelocs;
 	
+	Elf *e;
+	GElf_Addr bias;
+	int nrelocs;
+		
 public:
 	DwflWrapper() 
 	{
@@ -325,6 +328,8 @@ public:
 		return dwfl_handle;
 	}
 };
+
+DwflWrapper wr_dwfl;
 /* ====================================================================== */
 
 struct InsnInfo
@@ -355,6 +360,9 @@ struct SectionInfo
 	 * belongs to. */
 	unsigned int start_offset;
 	
+	/* Virtual address of the section when the binary is executed. */
+	GElf_Addr sh_addr;
+	
 	/* true if the section belongs to 'init' area, false otherwise. */
 	bool belongs_to_init;
 	
@@ -369,54 +377,7 @@ static TSectionMap sections;
 /* ====================================================================== */
 
 static void
-process_elf_file(DwflWrapper &wr_dwfl,
-		 void (*func)(DwflWrapper &, Elf *, int /* fd */))
-{
-	int fd;
-	Elf *e;
-	Elf_Kind ek;
-	
-	errno = 0;
-	fd = open(kmodule_path.c_str(), O_RDONLY, 0);
-	if (fd == -1) {
-		ostringstream err;
-		err << "Failed to open \"" << kmodule_path << "\": " <<
-			strerror(errno) << endl;
-		throw runtime_error(err.str());
-	}
-	
-	e = elf_begin(fd, ELF_C_READ, NULL);
-	if (e == NULL) {
-		close(fd);
-		ostringstream err;
-		err << "elf_begin() failed for " << kmodule_path << ": " <<
-			elf_errmsg(-1) << endl;
-		throw runtime_error(err.str());
-	}
-	
-	ek = elf_kind(e);
-	if (ek != ELF_K_ELF) {
-		elf_end(e);
-		close(fd);
-		throw runtime_error(
-			string("Not an ELF object file: ") + kmodule_path);
-	}
-	
-	try {
-		func(wr_dwfl, e, fd);
-	}
-	catch (runtime_error &err) {
-		elf_end(e);
-		close(fd);
-		throw;
-	}
-			
-	elf_end(e);
-	close(fd);
-}
-
-static void
-load_dwarf_info(DwflWrapper &wr_dwfl, Elf * /* unused */, int fd)
+do_load_dwarf_info(int fd)
 {
 	/* dwfl_report_*() functions close the file descriptor passed there 
 	 * if successful, so make a duplicate first. */
@@ -451,128 +412,64 @@ load_dwarf_info(DwflWrapper &wr_dwfl, Elf * /* unused */, int fd)
 		throw runtime_error(string(
 			"No relocations - is section info valid?"));
 	}
+	
+	wr_dwfl.e = dwfl_module_getelf(wr_dwfl.dwfl_mod, &wr_dwfl.bias);
+	if (wr_dwfl.e == NULL) {
+		throw runtime_error(string(
+			"Error while processing DWARF info: ") +
+			dwfl_errmsg(-1));
+	}
+}
+
+static void
+load_dwarf_info()
+{
+	int fd;
+	Elf *e;
+	Elf_Kind ek;
+	
+	errno = 0;
+	fd = open(kmodule_path.c_str(), O_RDONLY, 0);
+	if (fd == -1) {
+		ostringstream err;
+		err << "Failed to open \"" << kmodule_path << "\": " <<
+			strerror(errno) << endl;
+		throw runtime_error(err.str());
+	}
+	
+	e = elf_begin(fd, ELF_C_READ, NULL);
+	if (e == NULL) {
+		close(fd);
+		ostringstream err;
+		err << "elf_begin() failed for " << kmodule_path << ": " <<
+			elf_errmsg(-1) << endl;
+		throw runtime_error(err.str());
+	}
+	
+	ek = elf_kind(e);
+	if (ek != ELF_K_ELF) {
+		elf_end(e);
+		close(fd);
+		throw runtime_error(
+			string("Not an ELF object file: ") + kmodule_path);
+	}
+	
+	try {
+		do_load_dwarf_info(fd);
+	}
+	catch (runtime_error &err) {
+		elf_end(e);
+		close(fd);
+		throw;
+	}
+			
+	elf_end(e);
+	close(fd);
 }
 /* ====================================================================== */
 
 static void
-process_insn(SectionInfo &si, set<InsnInfo>::iterator &it, struct insn *insn, 
-	     const char *sec_name)
-{
-	if (no_filter) {
-		++it;
-		return;
-	}
-	
-	EAccessType at = AT_BOTH;
-	if (!is_tracked_memory_access(insn, &at, with_stack, with_locked)) {
-		if (verbose) {
-			cerr << "Removing the instruction at " << sec_name 
-				<< "+0x" << hex << it->offset << dec <<
-	" from the set: no memory accesses or they should not be processed."
-				<< endl;
-		}
-		it = si.insns.erase(it);
-		return;
-	}	
-	else if ((it->atype == AT_READ && at == AT_WRITE) || 
-		 (it->atype == AT_WRITE && at == AT_READ)) {
-		if (verbose) {
-			cerr << 
-			"Mismatching access types for the instruction at " 
-				<< sec_name 
-				<< "+0x" << hex << it->offset << dec 
-				<< ", removing it from the set." << endl;
-		}
-		it = si.insns.erase(it);
-		return;
-	}
-	
-	++it;
-	return;
-}
-
-/* Decode and filter the instructions in the area 
- * [data->d_off, data->d_off + data->d_size). */
-static void
-decode_and_filter(SectionInfo &si, set<InsnInfo>::iterator &it, 
-		  Elf_Data *data, const char *sec_name)
-{
-	unsigned int offset = (unsigned int)data->d_off;
-	struct insn insn;
-	unsigned char *start_addr = (unsigned char *)data->d_buf;
-	unsigned char *end_addr = start_addr + data->d_size;
-	
-	while (start_addr < end_addr && it != si.insns.end()) {
-		if (it->offset < offset) {
-			ostringstream err;
-			err << "Failed to find the instruction at "
-				<< sec_name << "+0x" << hex
-				<< it->offset << dec 
-				<< " in the binary file.";
-			throw runtime_error(err.str());
-		}
-		
-		insn_init(&insn, start_addr, is_module_x64);
-		insn_get_length(&insn);  /* Decode the instruction */
-		if (insn.length == 0) {
-			ostringstream err;
-			err << "Failed to decode the instruction at " 
-				<< sec_name 
-				<< "+0x" << hex << offset << dec 
-				<< " in the binary file.";
-			throw runtime_error(err.str());
-		}
-		
-		/* Some insns may have the same offset but different 
-		 * access types. */
-		while (it->offset == offset && it != si.insns.end())
-			process_insn(si, it, &insn, sec_name);
-		
-		start_addr += insn.length;
-		offset += insn.length;
-	}
-}
-
-/* Check the instructions selected so far in the given ELF sections and
- * filter out (remove from si.insns) those that should not be processed:
- * - the instructions that do not actually access memory;
- * - (if requested) %esp/%rsp-based accesses;
- * - (if requested) locked operations. */
-static void
-filter_insns(SectionInfo &si, Elf_Scn *scn, const char *sec_name)
-{
-	assert(scn != NULL);
-	
-	if (si.insns.empty())
-		return; 
-
-	Elf_Data *data;
-	
-	/* Points to the current insn to be checked. set<> makes sure the
-	 * elements are sorted and walked through in non-descending order of
-	 * the offsets in the section. */
-	set<InsnInfo>::iterator it = si.insns.begin();
-	
-	/* Each section may have 0 or more data chunks (usually 1 for code 
-	 * sections but we should not rely on that), process them all. */
-	data = NULL;
-	while ((data = elf_getdata(scn, data)) != NULL && 
-		it != si.insns.end()) {
-		assert(data->d_buf != NULL);
-		decode_and_filter(si, it, data, sec_name);
-	}
-	
-	if (it != si.insns.end()) {
-		ostringstream err;
-		err << "Failed to find the instruction at " << sec_name
-			<< "+0x" << hex << it->offset << dec 
-			<< " in the binary file.";
-		throw runtime_error(err.str());
-	}
-}
-
-static void
-process_elf_sections(DwflWrapper & /* unused */, Elf *e, int /* unused */)
+process_elf_sections(Elf *e)
 {
 	size_t sh_str_index;
 	Elf_Scn *scn;
@@ -581,9 +478,6 @@ process_elf_sections(DwflWrapper & /* unused */, Elf *e, int /* unused */)
 	GElf_Ehdr ehdr;
 	char *name;
 	
-	if (sections.empty())
-		return; /* No sections to look for, nothing to do. */
-		
 	/* Find the architecture the module was built for. */
 	if (gelf_getehdr(e, &ehdr) == NULL) {
 		ostringstream err;
@@ -620,12 +514,11 @@ process_elf_sections(DwflWrapper & /* unused */, Elf *e, int /* unused */)
 	}
 	
 	unsigned long mask = SHF_ALLOC | SHF_EXECINSTR;
-	TSectionMap::iterator it = sections.begin();
 	unsigned int init_offset = 0;
 	unsigned int core_offset = 0;
 
 	scn = NULL;
-	while ((scn = elf_nextscn(e, scn)) != NULL && it != sections.end()) {
+	while ((scn = elf_nextscn(e, scn)) != NULL) {
 		if (gelf_getshdr(scn, &shdr) != &shdr) {
 			ostringstream err;
 			err << "Failed to retrieve section header: "
@@ -647,47 +540,28 @@ process_elf_sections(DwflWrapper & /* unused */, Elf *e, int /* unused */)
 		idx = elf_ndxscn(scn);
 		bool is_init = starts_with(name, ".init");
 				
-		if (idx == it->first) {
-			if (verbose) {
-				cerr << "Setting the offset for section \""
-					<< name << "\" (#" << idx << "), "
-					<< (is_init ? "'init'" : "'core'")
-					<< " area." << endl;
-			}
-			SectionInfo &si = it->second;
-			if (is_init) { /* 'init' area */
-				si.belongs_to_init = true;
-				si.start_offset = init_offset;
-			}
-			else { /* 'core' area */
-				si.start_offset = core_offset;
-			}
+		if (verbose) {
+			cerr << "Setting the offset for section \""
+				<< name << "\" (#" << idx << "), "
+				<< (is_init ? "'init'" : "'core'")
+				<< " area." << endl;
+		}
 
-			filter_insns(si, scn, name);
-			++it;
+		if (is_init) { /* 'init' area */
+			sections[idx].belongs_to_init = true;
+			sections[idx].start_offset = init_offset;
 		}
-		else {
-			if (verbose) {
-				cerr << 
-		"No instructions of interest in section \"" <<
-					name << "\", skipping." << endl;
-			}
+		else { /* 'core' area */
+			sections[idx].start_offset = core_offset;
 		}
-		
+		sections[idx].sh_addr = shdr.sh_addr;
+
 		if (is_init) {
 			init_offset += (unsigned int)shdr.sh_size;
 		}
 		else {
 			core_offset += (unsigned int)shdr.sh_size;
 		}
-	}
-	
-	if (it != sections.end()) {
-		ostringstream err;
-			err << 
-		"Failed to find info for the sections starting from #"
-				<< it->first << endl;
-			throw runtime_error(err.str());
 	}
 }
 /* ====================================================================== */
@@ -705,10 +579,121 @@ output_insns(const SectionInfo &si)
 }
 /* ====================================================================== */
 
-/* [NB] Some portions of this code are based on "line2addr" test from 
- * elfutils. */
+/* Check the instruction and add it to si.insns if it should be processed.
+ * 
+ * The following kinds of instructions should not be processed:
+ * - the instructions that do not actually access memory;
+ * - (if requested) %esp/%rsp-based accesses;
+ * - (if requested) locked operations. */
+static void
+process_insn(struct insn *insn, SectionInfo &si, const char *sec_name, 
+	     unsigned int offset, EAccessType atype)
+{
+	InsnInfo ii = {
+		.offset = offset,
+		.atype = atype,
+	};
+
+	if (no_filter) {
+		si.insns.insert(ii);
+		return;
+	}
+	
+	EAccessType at = AT_BOTH;
+	if (!is_tracked_memory_access(insn, &at, with_stack, with_locked)) {
+		if (verbose) {
+			cerr << "Skipping the instruction at " 
+				<< sec_name << "+0x" 
+				<< hex << offset << dec <<
+	" : no memory accesses or they should not be processed."
+				<< endl;
+		}
+		return;
+	}	
+	else if ((atype == AT_READ && at == AT_WRITE) || 
+		 (atype == AT_WRITE && at == AT_READ)) {
+		if (verbose) {
+			cerr << 
+			"Mismatching access types for the instruction at " 
+				<< sec_name 
+				<< "+0x" << hex << offset << dec 
+				<< ", skipping it." << endl;
+		}
+		return;
+	}
+	
+	si.insns.insert(ii);
+	return;
+}
+
+/* Check if the insn at sec_name+0xoffset is for src_file:line. */
+static bool
+same_file_line(SectionInfo &si, const char *sec_name, unsigned int offset, 
+	       string src_file, int line)
+{
+	Dwarf_Addr addr = (Dwarf_Addr)offset + wr_dwfl.bias + si.sh_addr; 
+	Dwfl_Line *dw_line = dwfl_module_getsrc(wr_dwfl.dwfl_mod, addr);
+	if (dw_line == NULL)
+		return false; /* No DWARF info for the insn, OK. */
+	
+	const char *got_src;
+	int got_line = -1;
+	int col;
+	got_src = dwfl_lineinfo(dw_line, &addr, &got_line, &col, NULL, NULL);
+	
+	if (got_src == NULL || got_line == -1)
+		return false; /* Again, no DWARF info for the insn, OK. */
+	
+	if (line == got_line && src_file == got_src) {
+		if (verbose) {
+			cerr << "The insn at " << sec_name << "+0x"
+				<< hex << offset << dec 
+				<< " will be considered too." << endl;
+		}
+		return true;
+	}
+	return false;
+}
+
+/* Decode and filter the instructions starting from sec_name+0xoffset in the
+ * given data chunk ('data'). Add the insns corresponding to src_file:line
+ * to si.insns. At least, the first insn is for src_file:line. */
+static void
+decode_and_filter(unsigned int offset, Elf_Data *data, SectionInfo &si, 
+		  const char *sec_name, string src_file, int line, 
+		  EAccessType at)
+{
+	struct insn insn;
+	unsigned char *start_addr = 
+		(unsigned char *)data->d_buf + 
+			(offset - (unsigned int)data->d_off);
+	unsigned char *end_addr = 
+		(unsigned char *)data->d_buf + data->d_size;
+
+	while (start_addr < end_addr) {
+		insn_init(&insn, start_addr, is_module_x64);
+		insn_get_length(&insn);  /* Decode the instruction */
+		if (insn.length == 0) {
+			ostringstream err;
+			err << "Failed to decode the instruction at " 
+				<< sec_name 
+				<< "+0x" << hex << offset << dec 
+				<< " in the binary file.";
+			throw runtime_error(err.str());
+		}
+		
+		process_insn(&insn, si, sec_name, offset, at);
+
+		start_addr += insn.length;
+		offset += insn.length;
+		
+		if (!same_file_line(si, sec_name, offset, src_file, line))
+			break;
+	}
+}
+
 static void 
-find_insns(DwflWrapper &wr_dwfl, string src_file, int line, EAccessType at)
+find_insns(Elf *e, string src_file, int line, EAccessType at)
 {
 	Dwfl_Line **lines = NULL;
 	size_t nlines = 0;
@@ -758,21 +743,72 @@ find_insns(DwflWrapper &wr_dwfl, string src_file, int line, EAccessType at)
 			<< "failed to find the name of the ELF section";
 			throw runtime_error(err.str());
 		}
+		
+		TSectionMap::iterator it = sections.find(
+			(unsigned int)sec_idx);
+		if (it == sections.end()) {
+			ostringstream err;
+			err << prefix
+		<< "failed to find the ELF section for the instruction";
+			throw runtime_error(err.str());
+		}
+		
+		unsigned int offset = (unsigned int)addr;
+		
 		/* What we've got now:
-		 * addr - it is now the offset into the section,
+		 * offset, addr - it is now the offset into the section,
 		 * secname - name of the section,
-		 * sec_idx - index of the section in the ELF file. */
-		InsnInfo ii = {
-			.offset = (unsigned int)addr,
-			.atype = at,
-		};
-		sections[(unsigned int)sec_idx].insns.insert(ii);
+		 * sec_idx - index of the section in the ELF file,
+		 * it - iterator to <sec_idx, section> in the map. 
+		 *
+		 * If there are two or more consecutive insns for the same
+		 * file:line in the source, 'addr' is the address of the 
+		 * first one of them. We have to find the others: decode the
+		 * insns one by one, starting from 'addr' and check if they
+		 * belong to the same file:line. */
+		Elf_Scn *scn = elf_getscn(e, (size_t)sec_idx);
+		if (scn == NULL) {
+			ostringstream err;
+			err << prefix
+		<< "failed to find the section data for the instruction: "
+			<< elf_errmsg(-1) << endl;
+			throw runtime_error(err.str());
+		}
+		
+		/* Each section may have 0 or more data chunks (usually, a
+		 * single chunk for a code section but we should not rely 
+		 * on that), process them all. */
+		Elf_Data *data = NULL;
+		bool found = false;
+		while ((data = elf_getdata(scn, data)) != NULL) {
+			assert(data->d_buf != NULL);
+						
+			if (offset < (unsigned int)data->d_off ||
+			    offset >= (unsigned int)(data->d_off + 
+						     data->d_size)) {
+				continue;
+			}
+			found = true;
+			
+			decode_and_filter(offset, data, it->second, secname,
+					  src_file, line, at);
+			break;
+		}
+	
+		if (!found) {
+			ostringstream err;
+			err << "Failed to find the instruction at " 
+				<< secname << "+0x" 
+				<< hex << (unsigned int)addr << dec 
+				<< " in the binary file.";
+			throw runtime_error(err.str());
+		}
 	}
 	free(lines); /* See line2addr test in elfutils */
 }
 
 static void 
-process_input_line(DwflWrapper &wr_dwfl, const string &str)
+process_input_line(Elf *e, const string &str)
 {
 	/* trim first */
 	static string sep = " \t\n\r";
@@ -824,7 +860,16 @@ process_input_line(DwflWrapper &wr_dwfl, const string &str)
 	if (rest == NULL || rest[0] != 0)
 		throw runtime_error(string("Invalid input line: ") + str);
 	
-	find_insns(wr_dwfl, fpath, line_no, at);
+	find_insns(e, fpath, line_no, at);
+}
+
+static void
+process_input(Elf *e)
+{
+	string str;
+	while (getline(cin, str)) {
+		process_input_line(e, str);
+	}
 }
 /* ====================================================================== */
 
@@ -855,19 +900,23 @@ main(int argc, char *argv[])
 	}
 	
 	try {
-		DwflWrapper wr_dwfl;
-		process_elf_file(wr_dwfl, load_dwarf_info);
-		
-		/* Process the input and populate 'sections' map and the 
-		 * sets of instructions to inspect. */
-		string str;
-		while (getline(cin, str)) {
-			process_input_line(wr_dwfl, str);
-		}
+		load_dwarf_info();
+
+		/* [NB] Below, we need the Elf object from the dwfl module
+		 * because it has set virtual addresses for the sections
+		 * (sh_addr) appropriately. 
+		 * We cannot reopen the binary and use its Elf object:
+		 * sh_addr will be 0. This way we can miss some insns, 
+		 * because sh_addr is needed when looking for all the insns 
+		 * for a given src_file:line. */
 		
 		/* Find which area each section belongs to and what offset
-		 * the section has there. Filter the insns. */
-		process_elf_file(wr_dwfl, process_elf_sections);
+		 * the section has there. Populate 'sections' map. */
+		process_elf_sections(wr_dwfl.e);
+		
+		/* Process the input, populate and filter the sets of 
+		 * instructions of interest. */
+		process_input(wr_dwfl.e);
 		
 		/* Output the results, sorted by offset, init area first. */
 		TSectionMap::iterator it;
