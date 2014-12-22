@@ -301,7 +301,6 @@ public:
 	
 	Elf *e;
 	GElf_Addr bias;
-	int nrelocs;
 		
 public:
 	DwflWrapper() 
@@ -356,12 +355,19 @@ struct InsnInfo
  * section. */
 struct SectionInfo
 {
+	/* Name of the section. */
+	string name;
+	
 	/* Start offset of this section in the area ('init' or 'core') it 
-	 * belongs to. */
+	 * belongs to. 
+	 * Valid only for the modules, not for the kernel image. */
 	unsigned int start_offset;
 	
 	/* Virtual address of the section when the binary is executed. */
 	GElf_Addr sh_addr;
+	
+	/* Size of the section. */
+	unsigned int sh_size;
 	
 	/* true if the section belongs to 'init' area, false otherwise. */
 	bool belongs_to_init;
@@ -374,6 +380,9 @@ struct SectionInfo
 /* map: section_index => section_info */
 typedef map<unsigned int, SectionInfo> TSectionMap;
 static TSectionMap sections;
+
+/* Index of .text section, needed for the processing the kernel image. */
+unsigned int text_idx = 0;
 /* ====================================================================== */
 
 static void
@@ -401,17 +410,6 @@ do_load_dwarf_info(int fd)
 	}
 	
 	dwfl_report_end(wr_dwfl.get_handle(), NULL, NULL);
-	
-	wr_dwfl.nrelocs = dwfl_module_relocations(wr_dwfl.dwfl_mod);
-	if (wr_dwfl.nrelocs < 0) {
-		throw runtime_error(string(
-			"Failed to get the number of relocs: ") +
-			dwfl_errmsg(-1));
-	}
-	else if (wr_dwfl.nrelocs == 0) {
-		throw runtime_error(string(
-			"No relocations - is section info valid?"));
-	}
 	
 	wr_dwfl.e = dwfl_module_getelf(wr_dwfl.dwfl_mod, &wr_dwfl.bias);
 	if (wr_dwfl.e == NULL) {
@@ -540,13 +538,6 @@ process_elf_sections(Elf *e)
 		idx = elf_ndxscn(scn);
 		bool is_init = starts_with(name, ".init");
 				
-		if (verbose) {
-			cerr << "Setting the offset for section \""
-				<< name << "\" (#" << idx << "), "
-				<< (is_init ? "'init'" : "'core'")
-				<< " area." << endl;
-		}
-
 		if (is_init) { /* 'init' area */
 			sections[idx].belongs_to_init = true;
 			sections[idx].start_offset = init_offset;
@@ -554,8 +545,31 @@ process_elf_sections(Elf *e)
 		else { /* 'core' area */
 			sections[idx].start_offset = core_offset;
 		}
+		
+		sections[idx].name = string(name);
+		if (sections[idx].name == ".text")
+			text_idx = idx;
+		
 		sections[idx].sh_addr = shdr.sh_addr;
+		sections[idx].sh_size = (unsigned int)shdr.sh_size;
+		
+		if (verbose) {
+			cerr << "Setting the offset for section \""
+				<< name << "\" (#" << idx << "), "
+				<< (is_init ? "'init'" : "'core'")
+				<< " area, size: " 
+				<< sections[idx].sh_size << ".";
 
+			if (is_kernel_image()) {
+				cerr << " Start address: " << hex <<
+					shdr.sh_addr << dec 
+					<< ", alignment: "
+					<< (unsigned int)shdr.sh_addralign;
+			}
+			cerr << endl;
+		}
+
+		
 		if (is_init) {
 			init_offset += (unsigned int)shdr.sh_size;
 		}
@@ -586,8 +600,8 @@ output_insns(const SectionInfo &si)
  * - (if requested) %esp/%rsp-based accesses;
  * - (if requested) locked operations. */
 static void
-process_insn(struct insn *insn, SectionInfo &si, const char *sec_name, 
-	     unsigned int offset, EAccessType atype)
+process_insn(struct insn *insn, SectionInfo &si, unsigned int offset, 
+	     EAccessType atype)
 {
 	InsnInfo ii = {
 		.offset = offset,
@@ -603,7 +617,7 @@ process_insn(struct insn *insn, SectionInfo &si, const char *sec_name,
 	if (!is_tracked_memory_access(insn, &at, with_stack, with_locked)) {
 		if (verbose) {
 			cerr << "Skipping the instruction at " 
-				<< sec_name << "+0x" 
+				<< si.name << "+0x" 
 				<< hex << offset << dec <<
 	" : no memory accesses or they should not be processed."
 				<< endl;
@@ -615,7 +629,7 @@ process_insn(struct insn *insn, SectionInfo &si, const char *sec_name,
 		if (verbose) {
 			cerr << 
 			"Mismatching access types for the instruction at " 
-				<< sec_name 
+				<< si.name 
 				<< "+0x" << hex << offset << dec 
 				<< ", skipping it." << endl;
 		}
@@ -626,9 +640,9 @@ process_insn(struct insn *insn, SectionInfo &si, const char *sec_name,
 	return;
 }
 
-/* Check if the insn at sec_name+0xoffset is for src_file:line. */
+/* Check if the insn at si.name+0xoffset is for src_file:line. */
 static bool
-same_file_line(SectionInfo &si, const char *sec_name, unsigned int offset, 
+same_file_line(const SectionInfo &si, unsigned int offset, 
 	       string src_file, int line)
 {
 	Dwarf_Addr addr = (Dwarf_Addr)offset + wr_dwfl.bias + si.sh_addr; 
@@ -646,7 +660,7 @@ same_file_line(SectionInfo &si, const char *sec_name, unsigned int offset,
 	
 	if (line == got_line && src_file == got_src) {
 		if (verbose) {
-			cerr << "The insn at " << sec_name << "+0x"
+			cerr << "The insn at " << si.name << "+0x"
 				<< hex << offset << dec 
 				<< " will be considered too." << endl;
 		}
@@ -655,13 +669,12 @@ same_file_line(SectionInfo &si, const char *sec_name, unsigned int offset,
 	return false;
 }
 
-/* Decode and filter the instructions starting from sec_name+0xoffset in the
+/* Decode and filter the instructions starting from si.name+0xoffset in the
  * given data chunk ('data'). Add the insns corresponding to src_file:line
  * to si.insns. At least, the first insn is for src_file:line. */
 static void
 decode_and_filter(unsigned int offset, Elf_Data *data, SectionInfo &si, 
-		  const char *sec_name, string src_file, int line, 
-		  EAccessType at)
+		  string src_file, int line, EAccessType at)
 {
 	struct insn insn;
 	unsigned char *start_addr = 
@@ -676,20 +689,88 @@ decode_and_filter(unsigned int offset, Elf_Data *data, SectionInfo &si,
 		if (insn.length == 0) {
 			ostringstream err;
 			err << "Failed to decode the instruction at " 
-				<< sec_name 
+				<< si.name 
 				<< "+0x" << hex << offset << dec 
 				<< " in the binary file.";
 			throw runtime_error(err.str());
 		}
 		
-		process_insn(&insn, si, sec_name, offset, at);
+		process_insn(&insn, si, offset, at);
 
 		start_addr += insn.length;
 		offset += insn.length;
 		
-		if (!same_file_line(si, sec_name, offset, src_file, line))
+		if (!same_file_line(si, offset, src_file, line))
 			break;
 	}
+}
+
+/* Gets the section index (in the return value) and the offset (in 'offset')
+ * for the given address.
+ * Throws if not found; returns (GElf_Word)(-1) if this address should be
+ * skipped. 
+ * 
+ * 'msg_prefix' - a prefix for error/info messages.
+ *
+ * [NB] For a kernel image, the function only checks .text section and skips 
+ * addresses from other sections (that is not considered an error). 
+ * The debug info contains absolute addresses in this case. 
+ * 
+ * For the modules, it checks all code sections and throws if does not find
+ * a suitable one. The addresses in the debug info are relative there. */
+static GElf_Word
+get_section_and_offset(Dwarf_Addr addr, unsigned int &offset, 
+		       const string &msg_prefix)
+{
+	if (is_kernel_image()) {
+		SectionInfo &si = sections[text_idx];
+		if (addr < si.sh_addr || addr >= si.sh_addr + si.sh_size) {
+			if (verbose) {
+				cerr << msg_prefix 
+					<< ": the instruction at " 
+					<< hex << addr << dec 
+		<< " is outside of the kernel's .text section. Skipping." 
+					<< endl;
+			}
+			return (GElf_Word)(-1);
+		}
+		
+		offset = (unsigned int)(addr - si.sh_addr);
+		return (GElf_Word)text_idx;
+	}
+	
+	/* A module rather than a kernel image. */
+	int idx = dwfl_module_relocate_address(wr_dwfl.dwfl_mod, &addr);
+	if (idx < 0) {
+		ostringstream err;
+		err << msg_prefix
+			<< "failed to relocate the address: "
+			<< dwfl_errmsg(-1);
+		throw runtime_error(err.str());
+	}
+	
+	GElf_Word sec_idx = (GElf_Word)(-1);
+	const char *secname = dwfl_module_relocation_info (
+		wr_dwfl.dwfl_mod, idx, &sec_idx);
+	if (secname == NULL || secname[0] == '\0' || 
+		sec_idx == (GElf_Word)(-1)) {
+		ostringstream err;
+		err << msg_prefix
+			<< "failed to find the name of the ELF section";
+		throw runtime_error(err.str());
+	}
+	
+	TSectionMap::iterator it = sections.find(
+		(unsigned int)sec_idx);
+	if (it == sections.end()) {
+		ostringstream err;
+		err << msg_prefix
+		<< "failed to find the ELF section for the instruction";
+		throw runtime_error(err.str());
+	}
+	
+	offset = (unsigned int)addr;
+	return sec_idx;
 }
 
 static void 
@@ -722,50 +803,19 @@ find_insns(Elf *e, string src_file, int line, EAccessType at)
 		if (file == NULL)
 			continue;
 		
-		/* Find the section and the offset in it. */
-		int idx = dwfl_module_relocate_address(wr_dwfl.dwfl_mod, 
-						       &addr);
-		if (idx < 0) {
-			ostringstream err;
-			err << prefix
-				<< "failed to relocate the address: "
-				<< dwfl_errmsg(-1);
-			throw runtime_error(err.str());
-		}
+		unsigned int offset = 0;
+		GElf_Word sec_idx = get_section_and_offset(addr, offset, 
+							   prefix);
+		if (sec_idx == (GElf_Word)(-1))
+			continue;
 		
-		GElf_Word sec_idx = (GElf_Word)(-1);
-		const char *secname = dwfl_module_relocation_info (
-			wr_dwfl.dwfl_mod, idx, &sec_idx);
-		if (secname == NULL || secname[0] == '\0' || 
-		    sec_idx == (GElf_Word)(-1)) {
-			ostringstream err;
-			err << prefix
-			<< "failed to find the name of the ELF section";
-			throw runtime_error(err.str());
-		}
+		SectionInfo &sec = sections[sec_idx];
 		
-		TSectionMap::iterator it = sections.find(
-			(unsigned int)sec_idx);
-		if (it == sections.end()) {
-			ostringstream err;
-			err << prefix
-		<< "failed to find the ELF section for the instruction";
-			throw runtime_error(err.str());
-		}
-		
-		unsigned int offset = (unsigned int)addr;
-		
-		/* What we've got now:
-		 * offset, addr - it is now the offset into the section,
-		 * secname - name of the section,
-		 * sec_idx - index of the section in the ELF file,
-		 * it - iterator to <sec_idx, section> in the map. 
-		 *
-		 * If there are two or more consecutive insns for the same
-		 * file:line in the source, 'addr' is the address of the 
-		 * first one of them. We have to find the others: decode the
-		 * insns one by one, starting from 'addr' and check if they
-		 * belong to the same file:line. */
+		/* [NB] If there are two or more consecutive insns for the 
+		 * same file:line in the source, 'addr' is the address of 
+		 * the first one of them. We have to find the others: decode
+		 * the insns one by one, starting from 'addr' and check if 
+		 * they belong to the same file:line. */
 		Elf_Scn *scn = elf_getscn(e, (size_t)sec_idx);
 		if (scn == NULL) {
 			ostringstream err;
@@ -790,15 +840,15 @@ find_insns(Elf *e, string src_file, int line, EAccessType at)
 			}
 			found = true;
 			
-			decode_and_filter(offset, data, it->second, secname,
-					  src_file, line, at);
+			decode_and_filter(offset, data, sec, src_file, line,
+					  at);
 			break;
 		}
 	
 		if (!found) {
 			ostringstream err;
 			err << "Failed to find the instruction at " 
-				<< secname << "+0x" 
+				<< sec.name << "+0x" 
 				<< hex << (unsigned int)addr << dec 
 				<< " in the binary file.";
 			throw runtime_error(err.str());
