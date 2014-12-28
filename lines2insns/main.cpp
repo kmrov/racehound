@@ -589,7 +589,7 @@ static void
 output_insns(const SectionInfo &si)
 {
 	unsigned int prev_offset = (unsigned int)(-1);
-	
+
 	set<InsnInfo>::const_iterator it;
 	for (it = si.insns.begin(); it != si.insns.end(); ++it) {
 		/* Do not output the same insns more than once: it is not
@@ -990,9 +990,10 @@ main(int argc, char *argv[])
 		
 		/* 'core' area */
 		for (it = sections.begin(); it != sections.end(); ++it) {
-			if (!it->second.belongs_to_init)
+			if (!it->second.belongs_to_init) {
 				found = (found || !it->second.insns.empty());
 				output_insns(it->second);
+			}
 		}
 		
 		if (!found) {
