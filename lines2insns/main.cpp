@@ -969,16 +969,25 @@ main(int argc, char *argv[])
 		process_input(wr_dwfl.e);
 		
 		/* Output the results, sorted by offset, init area first. */
+		bool found = false;
 		TSectionMap::iterator it;
 		for (it = sections.begin(); it != sections.end(); ++it) {
-			if (it->second.belongs_to_init)
+			if (it->second.belongs_to_init) {
+				found = (found || !it->second.insns.empty());
 				output_insns(it->second);
+			}
 		}
 		
 		/* 'core' area */
 		for (it = sections.begin(); it != sections.end(); ++it) {
 			if (!it->second.belongs_to_init)
+				found = (found || !it->second.insns.empty());
 				output_insns(it->second);
+		}
+		
+		if (!found) {
+			cerr << "No instructions found." << endl;
+			return EXIT_FAILURE;
 		}
 	}
 	catch (runtime_error &e) {
