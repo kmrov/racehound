@@ -375,6 +375,11 @@ struct SectionInfo
 	/* The instructions in this section corresponding to the input 
 	 * source lines. */
 	set<InsnInfo> insns;
+	
+	/* Returns whether the address lies within this section. */
+	bool contains(Dwarf_Addr addr) {
+		return (addr >= sh_addr && addr < sh_addr + sh_size);
+	}
 };
 
 /* map: section_index => section_info */
@@ -724,7 +729,7 @@ get_section_and_offset(Dwarf_Addr addr, unsigned int &offset,
 {
 	if (is_kernel_image()) {
 		SectionInfo &si = sections[text_idx];
-		if (addr < si.sh_addr || addr >= si.sh_addr + si.sh_size) {
+		if (!si.contains(addr)) {
 			if (verbose) {
 				cerr << msg_prefix 
 					<< ": the instruction at " 
@@ -739,38 +744,33 @@ get_section_and_offset(Dwarf_Addr addr, unsigned int &offset,
 		return (GElf_Word)text_idx;
 	}
 	
-	/* A module rather than a kernel image. */
-	int idx = dwfl_module_relocate_address(wr_dwfl.dwfl_mod, &addr);
-	if (idx < 0) {
-		ostringstream err;
-		err << msg_prefix
-			<< "failed to relocate the address: "
-			<< dwfl_errmsg(-1);
-		throw runtime_error(err.str());
+	/* A module rather than a kernel image. 
+	 * 
+	 * When used for some kernel modules, libdw/libdwfl 0.159 behaves in
+	 * a way different from what one would expect. As a result, one 
+	 * cannot use dwfl_module_relocate_address() to find the section the
+	 * address belongs to like eu-addr2line does, for example. The 
+	 * function may not find the section because the addresses of 
+	 * __ksymtab_gpl, __kcrctab, __kcrctab_gpl sections in the array of 
+	 * sections (internal to libdwfl) are not relocated properly. 
+	 * Or, perhaps, something else is needed for libdw to properly load 
+	 * the module and avoid this problem - not sure what exactly.
+	 * 
+	 * So we just search the our array of sections explicitly. 
+	 * There are only a few sections with the code, so a plain linear 
+	 * search will be enough. */
+	TSectionMap::iterator it;
+	for (it = sections.begin(); it != sections.end(); ++it) {
+		SectionInfo &si = it->second;
+		if (si.contains(addr)) {
+			offset = (unsigned int)(addr - si.sh_addr);
+			return it->first;
+		}
 	}
 	
-	GElf_Word sec_idx = (GElf_Word)(-1);
-	const char *secname = dwfl_module_relocation_info (
-		wr_dwfl.dwfl_mod, idx, &sec_idx);
-	if (secname == NULL || secname[0] == '\0' || 
-		sec_idx == (GElf_Word)(-1)) {
-		ostringstream err;
-		err << msg_prefix
-			<< "failed to find the name of the ELF section";
-		throw runtime_error(err.str());
-	}
-	
-	TSectionMap::iterator it = sections.find(
-		(unsigned int)sec_idx);
-	if (it == sections.end()) {
-		ostringstream err;
-		err << msg_prefix
-		<< "failed to find the ELF section for the instruction";
-		throw runtime_error(err.str());
-	}
-	
-	offset = (unsigned int)addr;
-	return sec_idx;
+	throw runtime_error(
+		msg_prefix + "failed to find the name of the ELF section");
+	return -1; /* unreachable */
 }
 
 static void 
