@@ -588,8 +588,18 @@ process_elf_sections(Elf *e)
 static void
 output_insns(const SectionInfo &si)
 {
+	unsigned int prev_offset = (unsigned int)(-1);
+	
 	set<InsnInfo>::const_iterator it;
 	for (it = si.insns.begin(); it != si.insns.end(); ++it) {
+		/* Do not output the same insns more than once: it is not
+		 * needed now to keep separate records for different access
+		 * types. */
+		if (it->offset == prev_offset)
+			continue;
+		
+		prev_offset = it->offset;
+		
 		if (!is_kernel_image())
 			cout << kmodule_name << ":";
 		cout << (si.belongs_to_init ? "init+0x" : "core+0x") << hex
