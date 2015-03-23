@@ -28,6 +28,13 @@ set(RH_PACKAGE_VERSION
 )
 #######################################################################
 
+if (CMAKE_SIZEOF_VOID_P EQUAL 8) 
+	set (RH_64_BIT "yes")
+else ()
+	set (RH_64_BIT "no")
+endif()
+#######################################################################
+
 set(COMMON_SOURCE_DIR "${CMAKE_SOURCE_DIR}/common")
 set(COMMON_BINARY_DIR "${CMAKE_BINARY_DIR}/common")
 

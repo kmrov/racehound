@@ -1,4 +1,4 @@
-set(kmodule_name "race_hound")
+set(kmodule_name "racehound")
 
 kbuild_include_directories(
 	"${CMAKE_SOURCE_DIR}"
@@ -10,7 +10,7 @@ kbuild_add_module(${kmodule_name}
 	"rhound.c"
 	"functions.c"
 	"decoder.c"
-	"wrapper.S"
+	"thunks.S"
 	"functions.h"
 	"decoder.h"
 
