@@ -7,15 +7,15 @@ kbuild_include_directories(
 )
 
 kbuild_add_module(${kmodule_name}
-	"rhound.c"
-	"functions.c"
-	"decoder.c"
+	"racehound_main.c"
+	"insn_analysis.c"
+	"insn_analysis.h"
 	"thunks.S"
-	"functions.h"
-	"decoder.h"
-
 	"${COMMON_SOURCE_DIR}/inat.c"
+	"${COMMON_SOURCE_DIR}/inat.h"
 	"${COMMON_SOURCE_DIR}/insn.c"
+	"${COMMON_SOURCE_DIR}/insn.h"
+	"${COMMON_SOURCE_DIR}/inat_types.h"
 	"${COMMON_SOURCE_DIR}/util.c"
 	"${COMMON_SOURCE_DIR}/util.h"
 )

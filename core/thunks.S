@@ -15,6 +15,9 @@
 	pop %edx; \
 	pop %ecx;
 
+# define RH_PUSHF pushf
+# define RH_POPF popf
+
 #else 
 /* x86_64 */
 #  define RH_SAVE_SCRATCH_BUT_AX \
@@ -37,27 +40,35 @@
 	pop %rdx; \
 	pop %rcx;
 	
+# define RH_PUSHF pushfq
+# define RH_POPF popfq
+	
 #endif /* CONFIG_X86_32 */
 
 /* Creates a thunk ("_thunk_name") that calls a given function of RaceHound
- * ("_func") preserving the registers. "_func" must be a normal function, 
- * i.e. with the default calling convention / linkage. 
+ * ("_func") preserving the registers and flags. 
+ * "_func" must be a normal function, i.e. with the default calling 
+ * convention / linkage. 
+ * It must have the following type:
+ *    unsigned long _func(void);
  * 
- * "_func" must return the address to pass control to. 
+ * "_func" is expected to return the address to pass control to. 
  * The address will be in %eax/%rax after "call _func". We place it on top 
  * of the stack while restoring the old value of %eax/%rax and use "ret" to 
  * pass control there. */
 #define RH_MAKE_THUNK(_thunk_name, _func) \
-	.global _thunk_name \
-	.type _thunk_name,@function \
+	.global _thunk_name; \
+	.type _thunk_name,@function; \
 	_thunk_name: \
 		push %_ASM_AX; \
 		RH_SAVE_SCRATCH_BUT_AX; \
+		RH_PUSHF; \
 		call _func; \
+		RH_POPF; \
 		RH_RESTORE_SCRATCH_BUT_AX; \
 		xchg %_ASM_AX, (%_ASM_SP); \
 		ret; \
-	.size _thunk_name, .-_thunk_name
+	.size _thunk_name, .-_thunk_name;
 
 .text
 RH_MAKE_THUNK(rh_thunk_pre, rh_do_before_insn)

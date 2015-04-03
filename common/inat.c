@@ -3,8 +3,8 @@
  *
  * Written by Masami Hiramatsu <mhiramat@redhat.com>
  *
- * Handling of register usage information was implemented by 
- *  Eugene A. Shatokhin <spectre@ispras.ru>, 2011
+ * Handling of extended attributes was implemented by 
+ * Eugene A. Shatokhin <eugene.shatokhin@rosalab.ru>.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -33,133 +33,110 @@
 #include <common/insn.h>
 
 /* Attribute tables are generated from opcode map */
-#include <common/inat-tables.h>
+#include <common/inat-tables.c>
 
-void
-inat_zero_insn_attr(insn_attr_t *attr)
-{
-	memset(attr, 0, sizeof(insn_attr_t));
-}
+insn_attr_t inat_zero_attrs = {
+	.attributes = 0,
+	.addr_method1 = 0,
+	.opnd_type1 = 0,
+	.addr_method2 = 0,
+	.opnd_type2 = 0,
+};
 
-void 
-inat_copy_insn_attr(insn_attr_t *dest, const insn_attr_t *src)
+/* Merge attributes in 'attr' and 'other' and return the result. 
+ * 'attr' is usually the set of attributes for a group, 'other' - for an
+ * insn in that group. */
+static insn_attr_t inat_merge_insn_attr(insn_attr_t attr, insn_attr_t other)
 {
-	/* As we can not be sure the memory areas pointed to by 'dest' and 
-	 * 'src' do not overlap, we do not use memcpy() here. */
-	memmove(dest, src, sizeof(insn_attr_t));
-}
-
-/* Merge attributes in '*dest' and '*src', the result will be in '*dest'. 
- * A kind of "*dest |= *src", by the meaning. '*dest' is expected to contain 
- * more common data on entry while '*src' - more specific data. */
-static void 
-inat_merge_insn_attr(insn_attr_t *dest, const insn_attr_t *src)
-{
-	dest->attributes |= src->attributes;
+	attr.attributes |= other.attributes;
 	
-	/* If at least some operand information is defined in '*src', the
-	 * data from '*src' (including zero fields) should override the data
-	 * from '*dest'. Note that if the operand type is defined, the 
+	/* If at least some operand information is defined in 'other', the
+	 * data from 'other' (including zero fields) should override the data
+	 * from 'attr'. Note that if the operand type is defined, the 
 	 * addressing method must be defined too but not vice versa, so it 
 	 * is enough to check just the addressing method. */
-	if (src->addr_method1 != 0 || src->addr_method2 != 0) 
+	if (other.addr_method1 != 0 || other.addr_method2 != 0) 
 	{
-		dest->addr_method1 = src->addr_method1;
-		dest->opnd_type1 = src->opnd_type1;
-		dest->addr_method2 = src->addr_method2;
-		dest->opnd_type2 = src->opnd_type2;
+		attr.addr_method1 = other.addr_method1;
+		attr.opnd_type1 = other.opnd_type1;
+		attr.addr_method2 = other.addr_method2;
+		attr.opnd_type2 = other.opnd_type2;
 	}
+	
+	return attr;
 }
 
 /* Attribute search APIs */
-void 
-inat_get_opcode_attribute(insn_attr_t *attr, insn_byte_t opcode)
+insn_attr_t inat_get_opcode_attribute(insn_byte_t opcode)
 {
-	inat_copy_insn_attr(attr, &inat_primary_table[opcode]);
+	return inat_primary_table[opcode];
 }
 
-/* [NB] 'attr' and 'esc_attr' may point to the same memory */
-void 
-inat_get_escape_attribute(insn_attr_t *attr, insn_byte_t opcode, 
-	insn_byte_t last_pfx, const insn_attr_t *esc_attr)
+int inat_get_last_prefix_id(insn_byte_t last_pfx)
+{
+	insn_attr_t lpfx_attr;
+
+	lpfx_attr = inat_get_opcode_attribute(last_pfx);
+	return inat_last_prefix_id(lpfx_attr);
+}
+
+insn_attr_t inat_get_escape_attribute(insn_byte_t opcode, int lpfx_id,
+				      insn_attr_t esc_attr)
 {
 	const insn_attr_t *table;
-	insn_attr_t lpfx_attr;
-	int n, m = 0;
-	
+	int n;
+
 	n = inat_escape_id(esc_attr);
-	if (last_pfx) {
-		inat_get_opcode_attribute(&lpfx_attr, last_pfx);
-		m = inat_last_prefix_id(&lpfx_attr);
-	}
-	table = inat_escape_tables[n][0];
-	if (!table) {
-		inat_zero_insn_attr(attr);
-		return;
-	}
 
-	if (inat_has_variant(&table[opcode]) && m) {
-		table = inat_escape_tables[n][m];
-		if (!table) {
-			inat_zero_insn_attr(attr);
-			return;
-		}
+	table = inat_escape_tables[n][0];
+	if (!table)
+		return inat_zero_attrs;
+	if (inat_has_variant(table[opcode]) && lpfx_id) {
+		table = inat_escape_tables[n][lpfx_id];
+		if (!table)
+			return inat_zero_attrs;
 	}
-	
-	inat_copy_insn_attr(attr, &table[opcode]);
-	return;
+	return table[opcode];
 }
 
-/* [NB] 'attr' and 'grp_attr' may point to the same memory */
-void 
-inat_get_group_attribute(insn_attr_t *attr, insn_byte_t modrm, 
-	insn_byte_t last_pfx, const insn_attr_t *grp_attr)
+insn_attr_t inat_get_group_attribute(insn_byte_t modrm, int lpfx_id,
+				     insn_attr_t grp_attr)
 {
 	const insn_attr_t *table;
-	insn_attr_t lpfx_attr;
-	int n, m = 0;
+	int n;
 
 	n = inat_group_id(grp_attr);
-	if (last_pfx) {
-		inat_get_opcode_attribute(&lpfx_attr, last_pfx);
-		m = inat_last_prefix_id(&lpfx_attr);
-	}
 
 	table = inat_group_tables[n][0];
-	if (!table) {
-		inat_group_copy_common_attribute(attr, grp_attr);
-		return;
-	}
-
-	if (inat_has_variant(&table[X86_MODRM_REG(modrm)]) && m) {
-		table = inat_group_tables[n][m];
-		if (!table) {
-			inat_group_copy_common_attribute(attr, grp_attr);
-			return;
-		}
+	if (!table)
+		return inat_group_common_attribute(grp_attr);
+	if (inat_has_variant(table[X86_MODRM_REG(modrm)]) && lpfx_id) {
+		table = inat_group_tables[n][lpfx_id];
+		if (!table)
+			return inat_group_common_attribute(grp_attr);
 	}
 	
-	inat_group_copy_common_attribute(attr, grp_attr);
-	inat_merge_insn_attr(attr, &table[X86_MODRM_REG(modrm)]);
-	return;
+	return inat_merge_insn_attr(
+		table[X86_MODRM_REG(modrm)],
+		inat_group_common_attribute(grp_attr));
 }
 
-void 
-inat_get_avx_attribute(insn_attr_t *attr, insn_byte_t opcode, 
-	insn_byte_t vex_m, insn_byte_t vex_p)
+insn_attr_t inat_get_avx_attribute(insn_byte_t opcode, insn_byte_t vex_m,
+				   insn_byte_t vex_p)
 {
 	const insn_attr_t *table;
-	
-	inat_zero_insn_attr(attr);
-	
 	if (vex_m > X86_VEX_M_MAX || vex_p > INAT_LSTPFX_MAX)
-		return;
-
-	table = inat_avx_tables[vex_m][vex_p];
+		return inat_zero_attrs;
+	/* At first, this checks the master table */
+	table = inat_avx_tables[vex_m][0];
 	if (!table)
-		return;
-	
-	inat_copy_insn_attr(attr, &table[opcode]);
-	return;
+		return inat_zero_attrs;
+	if (!inat_is_group(table[opcode]) && vex_p) {
+		/* If this is not a group, get attribute directly */
+		table = inat_avx_tables[vex_m][vex_p];
+		if (!table)
+			return inat_zero_attrs;
+	}
+	return table[opcode];
 }
 

@@ -30,6 +30,7 @@ set(APP_SOURCES
 )
 
 add_executable(${APP_NAME} ${APP_SOURCES})
+add_dependencies(${APP_NAME} insn_decoder_headers)
 
 # _GNU_SOURCE is needed because at least getopt_long() is GNU extension.
 set_target_properties(${APP_NAME} PROPERTIES

@@ -152,7 +152,7 @@ show_usage()
 static void
 show_help()
 {
-	cerr << APP_HELP;
+	cout << APP_HELP;
 }
 
 static bool
@@ -699,7 +699,8 @@ decode_and_filter(unsigned int offset, Elf_Data *data, SectionInfo &si,
 		(unsigned char *)data->d_buf + data->d_size;
 
 	while (start_addr < end_addr) {
-		insn_init(&insn, start_addr, is_module_x64);
+		insn_init(&insn, start_addr, end_addr - start_addr, 
+			  is_module_x64);
 		insn_get_length(&insn);  /* Decode the instruction */
 		if (insn.length == 0) {
 			ostringstream err;

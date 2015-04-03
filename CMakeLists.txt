@@ -20,12 +20,8 @@ set(RH_PACKAGE_NAME "RaceHound")
 
 set(RH_VERSION_MAJOR 1)
 set(RH_VERSION_MINOR 0)
-set(RH_VERSION_MICRO 0)
-# "Version suffix, a string that should be appended to the version"
-set(RH_VERSION_SUFFIX "-devel")
-set(RH_PACKAGE_VERSION 
-"${RH_VERSION_MAJOR}.${RH_VERSION_MINOR}${RH_VERSION_SUFFIX}"
-)
+
+set(RH_PACKAGE_VERSION "${RH_VERSION_MAJOR}.${RH_VERSION_MINOR}")
 #######################################################################
 
 if (CMAKE_SIZEOF_VOID_P EQUAL 8) 
@@ -41,15 +37,15 @@ set(COMMON_BINARY_DIR "${CMAKE_BINARY_DIR}/common")
 file(MAKE_DIRECTORY "${COMMON_BINARY_DIR}")
 
 # This is needed for CMakeLists.txt from other directories could also refer
-# to inat-tables.h via this target.
+# to inat-tables.c via this target.
 add_custom_target(insn_decoder_headers
-	DEPENDS "${COMMON_BINARY_DIR}/inat-tables.h"
+	DEPENDS "${COMMON_BINARY_DIR}/inat-tables.c"
 )
 
-add_custom_command(OUTPUT "${COMMON_BINARY_DIR}/inat-tables.h"
+add_custom_command(OUTPUT "${COMMON_BINARY_DIR}/inat-tables.c"
 	COMMAND LC_ALL=C awk -f "${COMMON_SOURCE_DIR}/gen-insn-attr-x86.awk"
 		"${COMMON_SOURCE_DIR}/x86-opcode-map.txt" >
-		"${COMMON_BINARY_DIR}/inat-tables.h"
+		"${COMMON_BINARY_DIR}/inat-tables.c"
 	DEPENDS "${COMMON_SOURCE_DIR}/x86-opcode-map.txt"
 )
 #######################################################################
@@ -141,14 +137,10 @@ set(CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO} -g -Wall -Wext
 set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -Wall")
 
 #######################################################################
-# The path where the user-mode helper scripts are to be installed
-set(RH_UM_HELPER_PATH "${RH_INSTALL_PREFIX_EXEC}")
-
-#######################################################################
 # Perform basic checks
 
-# Check if we use kernel version 3.2 or newer
-check_kernel_version(3 2 0)
+# Check if we use kernel version 3.14 or newer
+check_kernel_version(3 14 0)
 
 # Check if kernel modules can be built on this system
 check_module_build()
