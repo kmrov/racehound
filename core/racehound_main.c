@@ -214,7 +214,7 @@ struct swbp
 	 * for HW BPs may still use it however. So the structure is
 	 * refcounted and will be deleted only if no longer used. */
 	struct kref kref;
-	
+
 	/* Whether this SW BP is armed (active) or not. */
 	bool armed;
 
@@ -324,10 +324,10 @@ create_swbp(struct swbp_group *grp, int is_init, unsigned int offset)
 	return swbp;
 }
 
-/* The opposite of arm_swbp(), see below. 
+/* The opposite of arm_swbp(), see below.
  * When calling this function, make sure the handlers for this SW BP are not
  * running at the moment.
- * 
+ *
  * Call this function with swbp_mutex locked. */
 static void
 disarm_swbp(struct swbp *swbp)
@@ -374,7 +374,7 @@ kp_pre(struct kprobe *p, struct pt_regs *regs)
 		pr_warning("[rh] Out of memory.\n");
 		/* [NB] The Kprobe has a post-handler, so "boost" will not
 		 * be used. This is good, because the insn slot contains
-		 * our jump after the insn and that jump must not be 
+		 * our jump after the insn and that jump must not be
 		 * executed now. */
 		return 0;
 	}
@@ -384,6 +384,13 @@ kp_pre(struct kprobe *p, struct pt_regs *regs)
 	swbp_hit->regs = *regs;
 	swbp_hit->regs.ip -= 1;
 	/* -1 because regs.ip is for the moment after int3 (0xcc) was hit.*/
+
+	/* regs->sp is not always saved by the kernel. Save the correct
+	 * value here.
+	 * [NB] Note that 'regs' is passed to kernel_stack_pointer() rather
+	 * than &swbp_hit->regs. See the description and the code of that
+	 * function for details. */
+	swbp_hit->regs.sp = kernel_stack_pointer(regs);
 
 	/* Make sure the swbp instance lives while it is needed. */
 	atomic_inc(&bps_in_use);
@@ -445,14 +452,14 @@ arm_swbp(struct swbp *swbp)
 
 	if (swbp->armed) {
 		pr_warning(
-		"[rh] Attempt to arm an already armed SW BP (%s).\n", 
+		"[rh] Attempt to arm an already armed SW BP (%s).\n",
 			swbp_to_string(swbp));
 		return -EINVAL;
 	}
-	
+
 	/* Zero the Kprobe before (re)arming. */
 	memset(&swbp->kp, 0, sizeof(struct kprobe));
-	
+
 	if (!mod) {
 		/* kernel */
 		if (swbp->is_init)
@@ -576,7 +583,7 @@ arm_swbp(struct swbp *swbp)
 	swbp->kp.ainsn.boostable = 1;
 
 	/* Add the jump to rh_thunk_post(), similar to how
-	 * synthesize_reljump() from Kprobes do such things. 
+	 * synthesize_reljump() from Kprobes do such things.
 	 * [NB] The insn is not a control-transfer insn because
 	 * rh_should_process_insn() returns 0 for these. */
 	from = (u8 *)swbp->kp.ainsn.insn + len;
@@ -603,7 +610,7 @@ out_unreg:
 	return ret;
 }
 
-/* Disables the BP (removes it from the code), removes swbp instance from 
+/* Disables the BP (removes it from the code), removes swbp instance from
  * its group and arranges for the instance to be freed eventually.
  *
  * Call this function with swbp_mutex locked.
@@ -1430,6 +1437,53 @@ static struct notifier_block module_event_nb = {
 };
 /* ====================================================================== */
 
+/* On x86-32, both thread stack and IRQ stacks seem to be organized in a
+ * similar way. Each stack is contained in a memory area of size
+ * THREAD_SIZE bytes, the start of the area being aligned at THREAD_SIZE
+ * byte boundary. The beginning of the area is occupied by 'thread_info'
+ * structure, the end - by the stack (growing towards the beginning). For
+ * simplicity, we treat the addresses pointing to 'thread_info' and to the
+ * stack the same way here. So, RaceHound may ignore the accesses to
+ * 'thread_info' structures as a result. Not a big deal, I guess.
+ *
+ * For details, see kernel/irq_32.c and include/asm/processor.h in arch/x86.
+ *
+ * Thread stack is organized on x86-64 in a similar way as on x86-32.
+ * IRQ stack has different organization, however. It is IRQ_STACK_SIZE bytes
+ * in size and seems to be placed at the beginning of some section with
+ * per-cpu data. Looks like the kernel data and code are located immediately
+ * before it.
+ * The start of the stack area may be aligned at IRQ_STACK_SIZE byte
+ * boundary - or it may be not. Still, it seems unlikely that an insn under
+ * analysis accesses the kernel data no more than IRQ_STACK_SIZE bytes
+ * before the IRQ stack. Anyway, such accesses will also be ignored by
+ * RaceHound. Let us suppose, for simplicity the IRQ stack is aligned at
+ * IRQ_STACK_SIZE byte boundary.
+ *
+ * Other stacks (exception stacks, debug stacks, etc.) are not considered
+ * here. */
+
+/* Align the pointer by the specified value ('align'). 'align' must be a
+ * power of 2). */
+#define RH_PTR_ALIGN(p, align) ((unsigned long)(p) & ~((align) - 1))
+
+/* true if the address refers to the current thread's stack or an IRQ stack,
+ * false otherwise. 'sp' the current value of %rsp/%esp register for that
+ * thread or IRQ.
+ * This function may be a bit inaccurate, see above. */
+static bool
+is_stack_address(unsigned long addr, unsigned long sp)
+{
+#ifdef CONFIG_X86_64
+	if (in_irq() || in_serving_softirq())
+		return (RH_PTR_ALIGN(addr, IRQ_STACK_SIZE) ==
+			RH_PTR_ALIGN(sp, IRQ_STACK_SIZE));
+#endif
+	return (RH_PTR_ALIGN(addr, THREAD_SIZE) ==
+		RH_PTR_ALIGN(sp, THREAD_SIZE));
+}
+/* ====================================================================== */
+
 static struct swbp_hit *
 find_swbp_hit(void)
 {
@@ -1496,8 +1550,11 @@ rh_do_before_insn(void)
 		goto out;
 	}
 
-	if (mi.addr == NULL) /* No access, actually. */
+	if (mi.addr == NULL ||
+	    is_stack_address((unsigned long)mi.addr, swbp_hit->regs.sp)) {
+		/* No access, actually, or an access to the stack. */
 		goto out;
+	}
 
 	/* Save the data in the memory area the insn is about to access.
 	 * We will check later if they change (the "repeated read check").
@@ -1954,11 +2011,11 @@ process_module_address(struct swbp_group *grp, int is_init,
 
 /* Limit on the length of the BP string the user may pass to RaceHound.
  * Nice to have, because the user might try to pass something big.
- * 
+ *
  * [<module>:]{init|core}+0xoffset
  * Module names longer than 30 bytes are rare, I guess 100+ bytes should be
- * much more than enough for the names. 
- * ':' and '+' are a byte in size each, '0x' - 2 bytes, "init|core" - 4 
+ * much more than enough for the names.
+ * ':' and '+' are a byte in size each, '0x' - 2 bytes, "init|core" - 4
  * bytes, offset - no more than 8 bytes (unsigned int is expected, <= 8 hex
  * digits). */
 #define RH_MAX_LEN_BP_STRING 128
@@ -2156,10 +2213,10 @@ static int __init
 rh_module_init(void)
 {
 	int ret = 0;
-	/* Better to have Kprobes' insn slots of 16 bytes in size or 
+	/* Better to have Kprobes' insn slots of 16 bytes in size or
 	 * larger. */
 	BUILD_BUG_ON(MAX_INSN_SIZE < 16);
-	
+
 	init_waitqueue_head(&waitq);
 
 	if (delay == 0)
