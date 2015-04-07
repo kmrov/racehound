@@ -1,97 +1,269 @@
 #!/bin/sh
 
-core_module="@CMAKE_BINARY_DIR@/core/racehound.ko"
+########################################################################
+# This test checks if RaceHound finds simple races in a a kernel module.
+# 
+# Usage:
+#   sh test.sh [--all] [--atomic]
+#
+# Without "--all", the SW BPs are set only for the instruction reading 
+# the variable in hello_plus() function of the target. With "--all" - for 
+# both the reading and the writing of the variable.
+# 
+# If "--atomic" is specified, the operations on that variable are 
+# performed in atomic context in hello_plus() (namely, under spinlock).
+########################################################################
 
-target_name="@module_name@"
-target_module="@CMAKE_CURRENT_BINARY_DIR@/${target_name}.ko"
+# Just in case the tools like insmod/rmmod are not in their usual locations.
+export PATH=$PATH:/sbin:/bin:/usr/bin:/usr/sbin
+########################################################################
 
-target_function="hello_plus"
-# TODO: Need to be configured somehow
-bp_offset="0x11"
+# A function to check prerequisites: whether the necessary files exist,
+# etc.
+checkPrereqs()
+{
+	if test ! -f "${CORE_MODULE}"; then
+		printf "The core module is missing: ${CORE_MODULE}\n"
+		exit 1
+	fi
 
-insmod_command=`PATH=$PATH:/sbin which insmod`
-rmmod_command=`PATH=$PATH:/sbin which rmmod`
+	if test ! -f "${TARGET_MODULE}"; then
+		printf "The target module is missing: ${TARGET_MODULE}\n"
+		exit 1
+	fi
+	
+	if test ! -f "${BPS_FILE}"; then
+		printf "The list of breakpoints is missing: ${BPS_FILE}\n"
+	fi
+}
+########################################################################
 
-# Need debugfs for read counter of races found
+cleanupTargets()
+{
+	printf "Cleaning up the target(s)...\n"
+
+	lsmod | grep "${TARGET_NAME}" > /dev/null 2>&1
+	if test $? -eq 0; then
+		rmmod "${TARGET_NAME}"
+	fi
+}
+########################################################################
+
+# Cleanup function
+cleanupAll()
+{
+	cd "${WORK_DIR}"
+
+	cleanupTargets
+
+	lsmod | grep "${CORE_MODULE_NAME}" > /dev/null 2>&1
+	if test $? -eq 0; then
+		rmmod "${CORE_MODULE_NAME}"
+	fi
+	
+	if ! umount "${DEBUGFS_DIR}"; then
+		printf "Failed to unmount debugfs directory.\n"
+		exit 1
+	fi
+}
+########################################################################
+
+loadTarget()
+{
+	insmod "${TARGET_MODULE}" "${TEST_ATOMIC_PARAM}"
+	if test $? -ne 0; then
+		printf "Failed to load the target module: ${TARGET_MODULE}\n"
+		cleanupAll
+		exit 1
+	fi
+}
+
+unloadTarget()
+{
+	lsmod | grep "${TARGET_NAME}" > /dev/null 2>&1
+	if test $? -eq 0; then
+		rmmod "${TARGET_NAME}"
+		if test $? -ne 0; then
+			printf "Failed to unload the module: ${TARGET_NAME}\n"
+			cleanupAll
+			exit 1
+		fi
+	fi
+}
+########################################################################
+
+doTestImpl()
+{
+	# The test itself.
+	# The repeated operations run concurrently: one in backgroud and one
+	# in the current thread.
+	sh @CMAKE_CURRENT_SOURCE_DIR@/plus.sh &
+
+	# Store pid to wait for after the test.
+	plus_pid=$!
+
+	sh @CMAKE_CURRENT_SOURCE_DIR@/minus.sh
+
+	# Wait until the background process is finished.
+	wait ${plus_pid}
+}
+
+checkFoundRaces()
+{
+	race_count=$(cat "${DEBUGFS_DIR}/racehound/race_count")
+	if test -z "${race_count}"; then
+		printf "Failed to read the race counter.\n"
+		cleanupAll
+		exit 1
+	elif test "t${race_count}" = "t0"; then
+		printf "No races found.\n"
+		cleanupAll
+		exit 1
+	else
+		printf "Found ${race_count} race(s).\n"
+	fi
+}
+
+doTest()
+{
+	if ! insmod ${CORE_MODULE}; then
+		printf "Failed to load RaceHound.\n"
+		cleanupAll
+		exit 1
+	fi
+
+	loadTarget
+	
+	bp_list_file="${DEBUGFS_DIR}/racehound/breakpoints"
+	
+	success=0
+	for bp in $(cat "${BPS_FILE}"); do
+		printf "Trying to set BP ${bp}...\n"
+		echo "${bp}" > "${bp_list_file}"
+		if test $? -eq 0; then
+			printf "Successfully set BP \"${bp}\".\n"
+			success=1
+		else 
+			printf "Failed to set BP \"${bp}\", continuing...\n"
+		fi
+	done
+	
+	printf "Here is the list of BPs that were set:\n"
+	cat "${bp_list_file}"
+	
+	if test ${success} -eq 0; then
+		printf "Error: no BPs were set.\n"
+		cleanupAll
+		exit 1
+	fi
+
+	printf "The first test run.\n"
+	doTestImpl
+	checkFoundRaces	
+	
+	printf "Clearing the race counter.\n"
+	echo 0 > "${DEBUGFS_DIR}/racehound/race_count"
+	race_count=$(cat "${DEBUGFS_DIR}/racehound/race_count")
+	if test "t${race_count}" != "t0"; then
+		printf "Failed to clear the race counter.\n"
+		cleanupAll
+		exit 1
+	fi
+	
+	# Run the test again to check if the counter still works.
+	printf "The second test run.\n"
+	doTestImpl
+	checkFoundRaces
+	
+	printf "Clearing the race counter again.\n"
+	echo 0 > "${DEBUGFS_DIR}/racehound/race_count"
+	race_count=$(cat "${DEBUGFS_DIR}/racehound/race_count")
+	if test "t${race_count}" != "t0"; then
+		printf "Failed to clear the race counter.\n"
+		cleanupAll
+		exit 1
+	fi
+	
+	# Now remove all the BPs, run the test again and check that 
+	# no races are found this time.
+	for bp in $(cat "${BPS_FILE}"); do
+		printf "Trying to remove BP ${bp}...\n"
+		echo "-${bp}" > "${bp_list_file}"
+		if test $? -eq 0; then
+			printf "Successfully removed BP \"${bp}\".\n"
+		else 
+			printf "Failed to removed BP \"${bp}\", continuing...\n"
+		fi
+	done
+	
+	success=1
+	for bp in $(cat "${bp_list_file}"); do
+		success=0
+	done
+	
+	if test ${success} -ne 1; then
+		printf "Failed to remove BPs. Here is what remains set:\n"
+		cat "${bp_list_file}"
+	fi
+	
+	printf "The third test run. No races should be found this time.\n"
+	doTestImpl
+	race_count=$(cat "${DEBUGFS_DIR}/racehound/race_count")
+	if test "t${race_count}" != "t0"; then
+		printf "The race counter is not 0: ${race_count}.\n"
+		cleanupAll
+		exit 1
+	fi
+	
+	unloadTarget
+	
+	if ! rmmod "${CORE_MODULE_NAME}"; then
+		printf "Failed to remove \"${CORE_MODULE_NAME}\" module.\n"
+		cleanupAll
+		exit 1
+	fi
+}
+########################################################################
+
+WORK_DIR=${PWD}
+CORE_MODULE_NAME=racehound
+CORE_MODULE="@CMAKE_BINARY_DIR@/core/${CORE_MODULE_NAME}.ko"
+TARGET_NAME="@module_name@"
+TARGET_MODULE="@CMAKE_CURRENT_BINARY_DIR@/${TARGET_NAME}.ko"
+BPS_SINGLE_FILE="@BPS_SINGLE_FILE@"
+BPS_ALL_FILE="@BPS_ALL_FILE@"
+
+TEST_ATOMIC_PARAM=""
+if test "t$1" = "t--atomic" || test "t$2" = "t--atomic"; then
+	TEST_ATOMIC_PARAM="test_atomic=1"
+fi
+
+BPS_FILE="${BPS_SINGLE_FILE}"
+if test "t$1" = "t--all" || test "t$2" = "t--all"; then
+	BPS_FILE="${BPS_ALL_FILE}"
+fi
+
+checkPrereqs
+
+# Need debugfs to read the count of the found races.
 TMP_DIR="@RH_TEST_PREFIX_TEMP@/test"
 DEBUGFS_DIR="${TMP_DIR}/debug"
 
-if ! mkdir -p "$DEBUGFS_DIR"; then
-	printf "Failed to create directory %s for mount debugfs\n" "$DEBUGFS_DIR"
+rm -rf "${DEBUGFS_DIR}"
+
+if ! mkdir -p "${DEBUGFS_DIR}"; then
+	printf "Failed to create directory ${DEBUGFS_DIR}\n"
 	exit 1
 fi
 
-if ! mount -t debugfs none "$DEBUGFS_DIR"; then
-	printf "Failed to mount debugfs to %s\n" "$DEBUGFS_DIR"
+if ! mount -t debugfs none "${DEBUGFS_DIR}"; then
+	printf "Failed to mount debugfs to ${DEBUGFS_DIR}\n"
+	rm -rf "${DEBUGFS_DIR}"
 	exit 1
 fi
 
-# Prepare to test
-if ! ${insmod_command} ${core_module} target_name=${target_name}; then
-	printf "Failed to load core module into kernel.\n"
-	umount "$DEBUGFS_DIR"
-	exit 1
-fi
+doTest
+cleanupAll
 
-if ! ${insmod_command} ${target_module}; then
-	printf "Failed to load target module into kernel.\n"
-	${rmmod_command} ${core_module}
-	umount "$DEBUGFS_DIR"
-	exit 1
-fi
-
-if test $1 = "--offset"; then
-    echo "${target_function}+${bp_offset}" > $DEBUGFS_DIR/racehound/breakpoints
-elif test $1 = "--function"; then
-    echo "${target_function}+*" > $DEBUGFS_DIR/racehound/breakpoints
-else
-    echo "${target_function}+${bp_offset}" > $DEBUGFS_DIR/racehound/breakpoints
-fi
-
-# Test itself.
-# 
-# To repeated operations run concurrently: one in backgroud and one in
-# the current thread.
-sh @CMAKE_CURRENT_SOURCE_DIR@/plus.sh&
-
-# Store pid for wait after test.
-plus_pid=$!
-
-sh @CMAKE_CURRENT_SOURCE_DIR@/minus.sh
-
-# Wait until background process is finished before finalize test
-wait ${plus_pid}
-
-if ! ${rmmod_command} ${target_module}; then
-	printf "Failed to unload target module.\n"
-	# Core module cannot be unloaded if target one is failed to unload.
-	umount "$DEBUGFS_DIR"
-	exit 1
-fi
-
-race_count=`cat "$DEBUGFS_DIR/racehound/race_count"`
-
-if test -z "$race_count"; then
-	printf "Failed to read counter of race found\n"
-	test_result=1
-elif test "$race_count" -eq "0"; then
-	printf "Races are not found\n"
-	test_result=1
-else
-	test_result=0
-fi
-
-if ! ${rmmod_command} ${core_module}; then
-	printf "Failed to unload core module.\n"
-	umount "$DEBUGFS_DIR"
-	exit 1
-fi
-
-if ! umount "$DEBUGFS_DIR"; then
-	printf "Failed to unmount debugfs directory after test\n"
-	exit 1
-fi
-
-exit ${test_result}
-
-
+# Test passed
+exit 0
