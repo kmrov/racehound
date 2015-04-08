@@ -1,0 +1,5 @@
+module_name=@KMODULE_NAME@
+
+ccflags-y := -g -I$(src)
+obj-m := ${module_name}.o
+${module_name}-y := cfake.o

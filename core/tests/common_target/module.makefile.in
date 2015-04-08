@@ -1,0 +1,14 @@
+module_name=@KMODULE_NAME@
+
+KBUILD_DIR=/lib/modules/$(shell uname -r)/build
+PWD=$(shell pwd)
+
+all: ${module_name}.ko
+
+${module_name}.ko: cfake.c
+	$(MAKE) -C ${KBUILD_DIR} M=${PWD} modules
+
+clean:
+	$(MAKE) -C ${KBUILD_DIR} M=${PWD} clean
+
+.PHONY: all clean
