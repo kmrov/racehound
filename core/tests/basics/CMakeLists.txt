@@ -6,9 +6,13 @@ else ()
 	set(BPS_ALL_FILE "${CMAKE_CURRENT_SOURCE_DIR}/breakpoints-all-x32.list")
 endif ()
 
-# Configure test script
+# Configure the test scripts
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/test.sh.in"
 	"${CMAKE_CURRENT_BINARY_DIR}/test.sh"
+	@ONLY)
+
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/test_active.sh.in"
+	"${CMAKE_CURRENT_BINARY_DIR}/test_active.sh"
 	@ONLY)
 
 # A single breakpoint in hello_plus(), the insn reads from memory.
@@ -17,6 +21,10 @@ rh_test_add_script("racehound.basics.01" "test.sh")
 # 2 breakpoint in hello_plus(), read and then write.
 rh_test_add_script("racehound.basics.02" "test.sh" "--all")
 
-# Same as "racehound.basics.02" but the read and write are executed in 
+# Same as "racehound.basics.02" but the read and write are executed in
 # atomic context now.
 rh_test_add_script("racehound.basics.03" "test.sh" "--all" "--atomic" )
+
+# Attaching RaceHound to the target and detaching from it while the
+# target works actively.
+rh_test_add_script("racehound.active.01" "test_active.sh")
