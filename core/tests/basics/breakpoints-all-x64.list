@@ -1,0 +1,11 @@
+test_simple:core+0x4f
+test_simple:core+0x50
+test_simple:core+0x58
+test_simple:core+0x79
+test_simple:core+0x84
+test_common_target:core+0x22f
+test_common_target:core+0x251
+test_common_target:init+0x153
+test_common_target:init+0xe
+test_common_target:init+0x134
+test_common_target:init+0x13b
