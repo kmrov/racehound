@@ -60,11 +60,6 @@ cleanupAll()
 	if test $? -eq 0; then
 		rmmod "${CORE_MODULE_NAME}"
 	fi
-	
-	if ! umount "${DEBUGFS_DIR}"; then
-		printf "Failed to unmount debugfs directory.\n"
-		exit 1
-	fi
 }
 ########################################################################
 
@@ -245,21 +240,17 @@ fi
 
 checkPrereqs
 
-# Need debugfs to read the count of the found races.
-TMP_DIR="@RH_TEST_PREFIX_TEMP@/test"
-DEBUGFS_DIR="${TMP_DIR}/debug"
-
-rm -rf "${DEBUGFS_DIR}"
-
-if ! mkdir -p "${DEBUGFS_DIR}"; then
-	printf "Failed to create directory ${DEBUGFS_DIR}\n"
-	exit 1
-fi
-
-if ! mount -t debugfs none "${DEBUGFS_DIR}"; then
-	printf "Failed to mount debugfs to ${DEBUGFS_DIR}\n"
-	rm -rf "${DEBUGFS_DIR}"
-	exit 1
+# Mount debugfs to /sys/kernel/debug if it is not already mounted there,
+# the output system needs that.
+# The real users will need to mount it there too.
+DEBUGFS_DIR="/sys/kernel/debug"
+mount | grep "${DEBUGFS_DIR}" > /dev/null
+if test $? -ne 0; then
+	mount -t debugfs none "${DEBUGFS_DIR}"
+	if test $? -ne 0; then
+		printf "Failed to mount debugfs to ${DEBUGFS_DIR}.\n"
+		exit 1
+	fi
 fi
 
 doTest
