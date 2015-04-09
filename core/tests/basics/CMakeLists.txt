@@ -15,6 +15,10 @@ configure_file("${CMAKE_CURRENT_SOURCE_DIR}/test_active.sh.in"
 	"${CMAKE_CURRENT_BINARY_DIR}/test_active.sh"
 	@ONLY)
 
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/test_modules.sh.in"
+	"${CMAKE_CURRENT_BINARY_DIR}/test_modules.sh"
+	@ONLY)
+
 # A single breakpoint in hello_plus(), the insn reads from memory.
 rh_test_add_script("racehound.basics.01" "test.sh")
 
@@ -28,3 +32,6 @@ rh_test_add_script("racehound.basics.03" "test.sh" "--all" "--atomic" )
 # Attaching RaceHound to the target and detaching from it while the
 # target works actively.
 rh_test_add_script("racehound.active.01" "test_active.sh")
+
+# Test how RaceHound handles loading/unloading/reloading of the modules.
+rh_test_add_script("racehound.modules.01" "test_modules.sh")

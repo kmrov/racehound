@@ -1,0 +1,198 @@
+#!/bin/sh
+
+########################################################################
+# This test checks if RaceHound properly handles loading, unloading and
+# reloading of the target kernel modules.
+#
+# Usage:
+#   sh test_modules.sh
+########################################################################
+
+# Just in case the tools like insmod/rmmod are not in their usual locations.
+export PATH=$PATH:/sbin:/bin:/usr/bin:/usr/sbin
+########################################################################
+
+# A function to check prerequisites: whether the necessary files exist,
+# etc.
+checkPrereqs()
+{
+	if test ! -f "${CORE_MODULE}"; then
+		printf "The core module is missing: ${CORE_MODULE}\n"
+		exit 1
+	fi
+
+	if test ! -f "${TARGET_MODULE}"; then
+		printf "The target module is missing: ${TARGET_MODULE}\n"
+		exit 1
+	fi
+
+	if test ! -f "${COMMON_TARGET_MODULE}"; then
+		printf "The target module is missing: ${COMMON_TARGET_MODULE}\n"
+		exit 1
+	fi
+
+	if test ! -f "${BPS_FILE}"; then
+		printf "The list of breakpoints is missing: ${BPS_FILE}\n"
+	fi
+
+	if test ! -f "${BPS_SINGLE_FILE}"; then
+		printf "The list of breakpoints is missing: ${BPS_SINGLE_FILE}\n"
+	fi
+}
+########################################################################
+
+cleanupTargets()
+{
+	printf "Cleaning up the target(s)...\n"
+
+	lsmod | grep "${TARGET_NAME}" > /dev/null 2>&1
+	if test $? -eq 0; then
+		rmmod "${TARGET_NAME}"
+	fi
+
+	lsmod | grep "${COMMON_TARGET_NAME}" > /dev/null 2>&1
+	if test $? -eq 0; then
+		rmmod "${COMMON_TARGET_NAME}"
+	fi
+}
+########################################################################
+
+# Cleanup function
+cleanupAll()
+{
+	cd "${WORK_DIR}"
+
+	cleanupTargets
+
+	lsmod | grep "${CORE_MODULE_NAME}" > /dev/null 2>&1
+	if test $? -eq 0; then
+		rmmod "${CORE_MODULE_NAME}"
+	fi
+}
+########################################################################
+
+# $1 - path to the module
+loadTarget()
+{
+	insmod "$1"
+	if test $? -ne 0; then
+		printf "Failed to load the target module: \"$1\"\n"
+		cleanupAll
+		exit 1
+	fi
+}
+
+# $1 - name of the module to unload
+unloadTarget()
+{
+	lsmod | grep "$1" > /dev/null 2>&1
+	if test $? -eq 0; then
+		rmmod "$1"
+		if test $? -ne 0; then
+			printf "Failed to unload the module: $1\n"
+			cleanupAll
+			exit 1
+		fi
+	fi
+}
+
+doTest()
+{
+	if ! insmod ${CORE_MODULE}; then
+		printf "Failed to load RaceHound.\n"
+		cleanupAll
+		exit 1
+	fi
+
+	loadTarget "${COMMON_TARGET_MODULE}"
+
+	bp_list_file="${DEBUGFS_DIR}/racehound/breakpoints"
+
+	success=0
+	for bp in $(cat "${BPS_FILE}"); do
+		echo "${bp}" > "${bp_list_file}"
+		if test $? -eq 0; then
+			printf "Successfully set BP \"${bp}\".\n"
+			success=1
+		else
+			printf "Failed to set BP \"${bp}\", continuing...\n"
+		fi
+	done
+
+	if test ${success} -eq 0; then
+		printf "Error: no BPs were set.\n"
+		kill -9 ${plus_pid}
+		kill -9 ${minus_pid}
+		cleanupAll
+		exit 1
+	fi
+	# [NB] The BPs for test_common_target:init area are pending now.
+
+	echo "something" > /dev/cfake0
+	echo "something" > /dev/cfake1
+
+	unloadTarget "${COMMON_TARGET_NAME}"
+	loadTarget "${COMMON_TARGET_MODULE}"
+
+	echo "something" > /dev/cfake0
+	echo "something" > /dev/cfake1
+
+	unloadTarget "${COMMON_TARGET_NAME}"
+
+	# Now load another target first.
+	loadTarget "${TARGET_MODULE}"
+
+	sh @CMAKE_CURRENT_SOURCE_DIR@/plus.sh &
+	plus_pid=$!
+
+	sh @CMAKE_CURRENT_SOURCE_DIR@/minus.sh &
+	minus_pid=$!
+
+	loadTarget "${COMMON_TARGET_MODULE}"
+	echo "something" > /dev/cfake0
+	echo "something" > /dev/cfake1
+
+	wait ${plus_pid}
+	wait ${minus_pid}
+
+	unloadTarget "${TARGET_NAME}"
+	unloadTarget "${COMMON_TARGET_NAME}"
+
+	if ! rmmod "${CORE_MODULE_NAME}"; then
+		printf "Failed to remove \"${CORE_MODULE_NAME}\" module.\n"
+		cleanupAll
+		exit 1
+	fi
+}
+########################################################################
+
+WORK_DIR=${PWD}
+
+CORE_MODULE_NAME=racehound
+CORE_MODULE="@CMAKE_BINARY_DIR@/core/${CORE_MODULE_NAME}.ko"
+TARGET_NAME="test_simple"
+TARGET_MODULE="@CMAKE_BINARY_DIR@/core/tests/simple/${TARGET_NAME}.ko"
+COMMON_TARGET_NAME="test_common_target"
+COMMON_TARGET_MODULE="@CMAKE_BINARY_DIR@/core/tests/common_target/${COMMON_TARGET_NAME}.ko"
+
+BPS_FILE="@BPS_ALL_FILE@"
+BPS_SINGLE_FILE="@BPS_SINGLE_FILE@"
+
+checkPrereqs
+
+# Mount debugfs to /sys/kernel/debug if it is not already mounted there,
+# the output system needs that.
+DEBUGFS_DIR="/sys/kernel/debug"
+mount | grep "${DEBUGFS_DIR}" > /dev/null
+if test $? -ne 0; then
+	mount -t debugfs none "${DEBUGFS_DIR}"
+	if test $? -ne 0; then
+		printf "Failed to mount debugfs to ${DEBUGFS_DIR}.\n"
+		exit 1
+	fi
+fi
+
+doTest
+cleanupAll
+
+exit 0
