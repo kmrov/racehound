@@ -1,2 +1,4 @@
+test_simple:core+0x1f
+test_simple:core+0x49
 test_simple:core+0x4f
 test_simple:core+0x79
