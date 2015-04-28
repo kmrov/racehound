@@ -79,7 +79,10 @@ struct insn {
 	const insn_byte_t *next_byte;
 };
 
-#define MAX_INSN_SIZE	16
+/* See commit 91e5ed49fca09c2b83b262b9757d1376ee2b46c3 in the mainline:
+ * "x86/asm/decoder: Fix and enforce max instruction size in the insn decoder"
+ */
+#define MAX_INSN_SIZE	15
 
 #define X86_MODRM_MOD(modrm) (((modrm) & 0xc0) >> 6)
 #define X86_MODRM_REG(modrm) (((modrm) & 0x38) >> 3)

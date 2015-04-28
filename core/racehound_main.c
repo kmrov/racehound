@@ -2213,9 +2213,9 @@ static int __init
 rh_module_init(void)
 {
 	int ret = 0;
-	/* Better to have Kprobes' insn slots of 16 bytes in size or
+	/* Better to have Kprobes' insn slots of 15 bytes in size or
 	 * larger. */
-	BUILD_BUG_ON(MAX_INSN_SIZE < 16);
+	BUILD_BUG_ON(MAX_INSN_SIZE < 15);
 
 	init_waitqueue_head(&waitq);
 
