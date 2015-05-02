@@ -47,3 +47,8 @@ target_link_libraries(${APP_NAME} "elf" "dw")
 install(TARGETS ${APP_NAME}
 	DESTINATION ${RH_INSTALL_PREFIX_EXEC})
 #######################################################################
+
+# Testing
+add_subdirectory(tests)
+#######################################################################
+
