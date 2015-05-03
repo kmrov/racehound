@@ -1,4 +1,4 @@
-module_name=kedr_sample_target
+module_name=test_common_target
 
 ccflags-y := -g -I$(src)
 
@@ -9,4 +9,4 @@ ${module_name}-y := cfake.o
 # files only. Other files will not be affected.
 CFLAGS_cfake.o := \
     -fplugin=@PLUGIN_PATH@ \
-    -fplugin-arg-@PLUGIN_NAME@-file=@CMAKE_CURRENT_BINARY_DIR@/ma_lines_out.list
+    -fplugin-arg-@PLUGIN_NAME@-file=@CMAKE_CURRENT_BINARY_DIR@/build01/ma_lines_out.list

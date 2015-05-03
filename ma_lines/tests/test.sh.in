@@ -1,0 +1,98 @@
+#!/bin/sh
+
+########################################################################
+# This test checks if test_common_target.ko module can be built with 
+# ma_lines enabled and that the latter finds the source lines with racy
+# accesses.
+# 
+# Usage:
+#   sh test.sh
+########################################################################
+
+# Just in case the tools like insmod/rmmod are not in their usual locations.
+export PATH=$PATH:/sbin:/bin:/usr/bin:/usr/sbin
+########################################################################
+
+doTest()
+{
+	# Build the module
+	make -C ${KBUILD_DIR} M=$(pwd) modules
+	if test $? -ne 0; then
+		printf "Failed to build the module.\n"
+		exit 1
+	fi
+
+	# Check the list of the source lines the plugin has found.
+	for expected in "cfake.c:82:read" "cfake.c:84:write"; do
+		grep -F $expected ./ma_lines_out.list > /dev/null
+		if test $? -ne 0; then
+			printf "Failed to find \"$expected\" in ma_lines_out.list\n"
+			exit 1
+		fi
+	done
+	
+	# Check if the module is operational.
+	insmod ./test_common_target.ko
+	if test $? -ne 0; then
+		printf "Failed to load test_common_target.ko.\n"
+		exit 1
+	fi
+	
+	success=1
+	echo "Abracadabra" > /dev/cfake0
+	if test $? -ne 0; then
+		success=0
+		printf "Failed to write data to /dev/cfake0.\n"
+	fi
+	
+	printf "Reading: "
+	dd if=/dev/cfake0 bs=30 count=1
+	if test $? -ne 0; then
+		success=0
+		printf "Failed to read data from /dev/cfake0.\n"
+	fi
+	
+	rmmod test_common_target
+	if test $? -ne 0; then
+		printf "Failed to unload \"test_common_target\" module.\n"
+		exit 1
+	fi
+	
+	if test $success -ne 1; then
+		exit 1
+	fi
+}
+########################################################################
+
+WORK_DIR=${PWD}
+SRCDIR="@CMAKE_SOURCE_DIR@/core/tests/common_target"
+BUILDDIR="@CMAKE_CURRENT_BINARY_DIR@/build01"
+KBUILD_DIR=/lib/modules/$(uname -r)/build
+
+rm -rf "${BUILDDIR}"
+mkdir -p "${BUILDDIR}"
+if test $? -ne 0; then
+	printf "Failed to create directory ${BUILDDIR}\n"
+	exit 1
+fi
+
+pushd "${SRCDIR}" || exit 1
+for ff in cfake.c cfake.h; do
+	cp ${ff} "${BUILDDIR}/"
+	if test $? -ne 0; then
+		printf "Failed to copy ${ff}.\n"
+	fi
+done
+popd
+
+cp "@CMAKE_CURRENT_BINARY_DIR@/Kbuild" "${BUILDDIR}/"
+if test $? -ne 0; then
+	printf "Failed to copy Kbuild file.\n"
+fi
+
+pushd "${BUILDDIR}" || exit 1
+doTest
+popd
+
+# Test passed
+exit 0

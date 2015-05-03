@@ -48,6 +48,6 @@ install (TARGETS ${PLUGIN_NAME}
 )
 #######################################################################
 
-# An example based on my "kedr_sample_target" "guinea pig"
-add_subdirectory(tests/sample_target)
+# Testing
+add_subdirectory(tests)
 #######################################################################
