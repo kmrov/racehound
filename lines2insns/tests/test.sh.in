@@ -24,7 +24,7 @@ checkPrereqs()
 
 doTest()
 {
-	insns_list=insns01.list
+	insns_list="@CMAKE_CURRENT_BINARY_DIR@/insns01.list"
 	"@CMAKE_BINARY_DIR@/lines2insns/lines2insns" "${MODULE}" \
 		< "${LINES_FILE}" \
 		> ${insns_list}
