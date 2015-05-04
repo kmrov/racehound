@@ -29,7 +29,6 @@
 #include "timevar.h"
 
 #include "params.h"
-#include "pointer-set.h"
 #include "debug.h"
 #include "target.h"
 #include "langhooks.h"
@@ -53,7 +52,6 @@
 #include "tree-dump.h"
 #include "tree-pass.h"
 #include "predict.h"
-//#include "ipa-utils.h"
 
 #if BUILDING_GCC_VERSION >= 4009
 #include "varasm.h"

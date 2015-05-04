@@ -1,3 +1,15 @@
+/* "ma_lines" - GCC plugin that outputs the list of the source locations
+ * where memory accesses may happen.
+ *
+ * See Readme.txt for the usage details.
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 as published
+ * by the Free Software Foundation.
+ *
+ * Copyright (C) 2014, Eugene Shatokhin <eugene.shatokhin@rosalab.ru>
+ */
+
 /* Some of the functions here are based on the implementation of 
  * ThreadSanitizer from GCC 4.9 (gcc/tsan.c). */
 
@@ -11,8 +23,6 @@
 #include <stdio.h>
 #include <sys/file.h>
 
-#include <iostream>
-#include <fstream>
 #include <string>
 #include <set>
 
@@ -271,7 +281,7 @@ process_gimple(gimple_stmt_iterator *gsi)
 /* The main function of the pass. Called for each function to be processed.
  */
 static unsigned int
-do_execute()
+do_execute(function *func)
 {
 	//<>
 	/*fprintf(stderr, "[DBG] Processing function \"%s\".\n",
@@ -281,7 +291,7 @@ do_execute()
 	basic_block bb;
 	gimple_stmt_iterator gsi;
 	
-	FOR_EACH_BB_FN (bb, cfun) {
+	FOR_EACH_BB_FN (bb, func) {
 		for (gsi = gsi_start_bb(bb); !gsi_end_p(gsi); 
 		     gsi_next(&gsi)) {
 			process_gimple(&gsi);
@@ -302,7 +312,10 @@ static struct gimple_opt_pass my_pass = {
 #if BUILDING_GCC_VERSION >= 4008
 		.optinfo_flags = OPTGROUP_NONE,
 #endif
-#if BUILDING_GCC_VERSION >= 4009
+
+#if BUILDING_GCC_VERSION >= 5000
+		/* nothing is needed here */
+#elif BUILDING_GCC_VERSION >= 4009
 		.has_gate	= false,
 		.has_execute	= true,
 #else
@@ -330,7 +343,15 @@ public:
 	my_pass() 
 	  : gimple_opt_pass(my_pass_data, g) 
 	{}
-	unsigned int execute() { return do_execute(); }
+#  if BUILDING_GCC_VERSION >= 5000
+	bool gate (function *) { return true; }
+	virtual unsigned int execute(function *func)
+	{
+		return do_execute(func);
+	}
+#  else
+	unsigned int execute() { return do_execute(cfun); }
+#  endif
 }; /* class my_pass */
 }  /* anon namespace */
 #endif
