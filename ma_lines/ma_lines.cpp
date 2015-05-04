@@ -29,13 +29,6 @@
 #include <common/util.h>
 /* ====================================================================== */
 
-#if BUILDING_GCC_VERSION <= 4008
-#define ENTRY_BLOCK_PTR_FOR_FN(FN)	ENTRY_BLOCK_PTR_FOR_FUNCTION(FN)
-#define EXIT_BLOCK_PTR_FOR_FN(FN)	EXIT_BLOCK_PTR_FOR_FUNCTION(FN)
-#endif
-
-/* ====================================================================== */
-
 /* Use this to mark the functions to be exported from this plugin. The 
  * remaining functions will not be visible from outside of this plugin even
  * if they are not static (-fvisibility=hidden GCC option is used to achieve
@@ -216,10 +209,6 @@ process_expr(gimple_stmt_iterator gsi, tree expr, bool is_write)
 		expr, &bitsize, &bitpos, &offset, &mode, &unsignedp, 
 		&volatilep, false);
 
-	/* [?] Looks like (gcc/passes.def) IPA passes come after "einline" 
-	 * pass, so we may need another pass to use the results of IPA 
-	 * analysis. This is because most of the instrumentation is done 
-	 * here before "einline" pass. */
 	if (DECL_P(base)) {
 		struct pt_solution pt;
 		memset(&pt, 0, sizeof(pt));
@@ -301,29 +290,15 @@ do_execute(function *func)
 }
 /* ====================================================================== */
 
-#if BUILDING_GCC_VERSION >= 4009
 static const struct pass_data my_pass_data = {
-#else
-static struct gimple_opt_pass my_pass = {
-	.pass = {
-#endif
 		.type = 	GIMPLE_PASS,
 		.name = 	"racehound_ma_lines",
-#if BUILDING_GCC_VERSION >= 4008
 		.optinfo_flags = OPTGROUP_NONE,
-#endif
 
-#if BUILDING_GCC_VERSION >= 5000
-		/* nothing is needed here */
-#elif BUILDING_GCC_VERSION >= 4009
+#if BUILDING_GCC_VERSION < 5000
+		/* GCC 4.9 */
 		.has_gate	= false,
 		.has_execute	= true,
-#else
-		.gate = 	NULL,
-		.execute =	do_execute, /* main function of the pass */
-		.sub = 		NULL,
-		.next = 	NULL,
-		.static_pass_number = 0,
 #endif
 		.tv_id = 	TV_NONE,
 		.properties_required = PROP_ssa | PROP_cfg,
@@ -331,12 +306,8 @@ static struct gimple_opt_pass my_pass = {
 		.properties_destroyed = 0,
 		.todo_flags_start = 0,
 		.todo_flags_finish = TODO_verify_all | TODO_update_ssa
-#if BUILDING_GCC_VERSION < 4009
-	}
-#endif
 };
 
-#if BUILDING_GCC_VERSION >= 4009
 namespace {
 class my_pass : public gimple_opt_pass {
 public:
@@ -354,15 +325,10 @@ public:
 #  endif
 }; /* class my_pass */
 }  /* anon namespace */
-#endif
 
 static struct opt_pass *make_my_pass(void)
 {
-#if BUILDING_GCC_VERSION >= 4009
 	return new my_pass();
-#else
-	return &my_pass.pass;
-#endif
 }
 /* ====================================================================== */
 

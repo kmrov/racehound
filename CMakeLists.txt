@@ -179,9 +179,9 @@ if (BUILD_MA_LINES_PLUGIN)
 	
 	# Build the GCC plugin only if GCC is used as the compiler.
 	if (NOT CMAKE_COMPILER_IS_GNUCC OR
-	    CMAKE_C_COMPILER_VERSION VERSION_LESS 4.8)
+	    CMAKE_C_COMPILER_VERSION VERSION_LESS 4.9)
 		message(WARNING 
-		"\"ma_lines\" plugin requires GCC 4.8 or newer, skipping.")
+		"\"ma_lines\" plugin requires GCC 4.9 or newer, skipping.")
 		set(do_build_ma_lines FALSE)
 	else ()
 		# Find the directory with the header files for GCC plugins
@@ -218,7 +218,7 @@ if (BUILD_MA_LINES_PLUGIN)
 		add_subdirectory(ma_lines)
 	else()
 		message (STATUS 
-"Not building \"ma_lines\": it requires GCC 4.8 or newer with plugin support.")
+"Not building \"ma_lines\": it requires GCC 4.9 or newer with plugin support.")
 	endif()
 endif () # BUILD_MA_LINES_PLUGIN
 #######################################################################
