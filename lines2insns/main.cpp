@@ -1122,7 +1122,7 @@ do_convert()
 	while (getline(cin, str)) {
 		string sa;
 		string module_name;
-		unsigned int offset;
+		unsigned int offset = 0;
 
 		if (!parse_addr_line(str, module_name, sa, offset))
 			continue;
