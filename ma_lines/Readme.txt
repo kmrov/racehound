@@ -5,6 +5,8 @@ GCC plugin "ma_lines" finds the locations in the source code where memory
 is read from or written to and outputs these locations 
 (file:line[:access_type]) to a given file.
 
+GCC 4.9 or newer is required.
+
 The plugin operates during the compilation of the kernel and/or modules.
 
 'access_type' is 'read' or 'write' depending on how memory is accessed in 
