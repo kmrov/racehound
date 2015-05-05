@@ -104,7 +104,7 @@ locations in test_module:
 
 2. Load racehound.ko if it is not loaded yet.
 
-  insmod racehound.ko [delay=...] [delay_in_atomic=...]
+  insmod /usr/local/lib/modules/$(uname -r)/misc/racehound.ko [delay=...]
 
 You can optionally specify how long to delay execution of the instructions
 to check for the conflicting memory accesses. "delay" parameter of
