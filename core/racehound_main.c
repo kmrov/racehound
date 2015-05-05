@@ -7,7 +7,7 @@
  *
  * The idea, in short:
  *
- * 1. Place a software breakpoint on the instruction that may access memory.
+ * 1. Place a software breakpoint on an instruction that may access memory.
  *
  * 2. When the software breakpoint hits, determine the address and the size
  *    of the memory area the instruction is about to access.
@@ -23,12 +23,13 @@
  * 5. Make a delay. If some code makes a conflicting access to that memory
  *    area during the delay, the hardware breakpoints might detect it.
  *
- * 6. Check if the contents of that memory area have changed during the
+ * 6. Disarm the hardware breakpoints.
+ *
+ * 7. Check if the contents of that memory area have changed during the
  *    delay (optional). This may help detect conflicting accesses that the
  *    hardware breakpoints do not catch (DMA?).
  *
- * 7. Disarm the hardware breakpoints. Let the instruction execute as
- *    usual. */
+ * 8. Let the instruction execute as usual. */
 /* ====================================================================== */
 
 /* This program is free software; you can redistribute it and/or modify it
