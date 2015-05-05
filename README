@@ -1,73 +1,214 @@
-﻿RaceHound
+﻿# RaceHound
 --------------
-RaceHound project provides the tools for detect data races in Linux
-kernel modules (device drivers, file system modules,
-etc.) in runtime.
+RaceHound can be used to detect data races in the Linux kernel on x86.
 
-Currently, RaceHound is intended for systems with x86 architecture, 
-both 32- and 64-bit.
+Kernel 3.14 or newer is required. Kprobes, kallsyms and debugfs support are
+also needed in the kernel.
 
-Project site: http://github.com/winnukem/racehound
+The ideas implemented here are similar to how DataCollider tool operates
+on MS Windows.
 
-Basic Usage
+# How it works
+---------------
+
+The kernel part of RaceHound (racehound.ko module) monitors the instructions
+in the kernel code in runtime. It operates as follows:
+
+1. Place software breakpoints (Kprobes, actually) at the locations specified
+by the user.
+
+2. When a software breakpoint hits, check if the corresponding instruction
+is about to access memory. Determine the address and the size of that memory
+area.
+
+3. Save the contents of that area (or at least a part of it).
+
+4. Place a hardware breakpoint on that memory area to detect writes (if the
+instruction reads from it) or both reads and writes (if the instruction
+writes to it).
+
+5. Make a delay. The length of the delay is configurable.
+If some code tried to access that memory area during the delay, the hardware
+breakpoint might have detected it.
+
+6. Disarm the hardware breakpoint.
+
+7. Just in case, check if the contents of that memory area have changed
+during the delay. Might help detect races that were not caught above.
+
+8. Let the execution continue as usual.
+
+The found races are reported to the system log.
+
+# Usage
 --------------
 
-Use case 1.
- 
-Suppose you would like to find out if there is a race in the kernel module 
-named "foo_driver" between the instruction at the offset 0xf00d in the 
-function "bar".
+It is assumed here that debugfs is available and mounted to /sys/kernel/debug.
 
-Here we assume RaceHound is installed to the default location (/usr/local/...).
+## Scenario 1: monitoring a set of instructions
 
-1. Unload foo_driver if it is already loaded.
+1. The user can tell the kernel part of RaceHound to monitor the particular
+instructions in the kernel code. The locations of these instructions should
+be written to /sys/kernel/debug/racehound/breakpoints in the following
+format:
 
-2. If debugfs is not mounted, mount it:
+  [<module_name>:]{init|core}+0xoffset
 
-    # mount -t debugfs none /sys/kernel/debug
+If <module_name> is not specified, the kernel or a built-in module is
+assumed.
 
-3. Load RaceHound and specify the name of the target:
-  
-    # insmod /usr/local/lib/modules/$(uname -r)/misc/racehound.ko \
-        target_name=foo_driver
+"init" and "core" are the areas containing the code of the kernel or a
+module in memory. See module_init and module_core in struct module. Dealing
+with the ELF sections in the kernel has its difficulties, same for the
+addresses and sizes of the functions, so RaceHound uses "init" and "core"
+areas instead.
 
-Note. You can also specify how long (in milliseconds) to delay execution of a 
-monitored instruction when waiting for a conflicting access. Parameter 'delay'
-is used for this. 0 means the default value, which is acceptable in most cases.
+lines2insns tool from this project can help prepare the location strings in
+the correct format.
 
-4. You may instruct RaceHound to monitor the instruction at bar+0xf00d
-already (or you may do so after you load the target module).
+Suppose you would like to monitor the memory accesses corresponding to the
+lines 82 and 84 in something.c source file of test_module.ko. The module
+should be built with debug info. Then you can do the following.
 
-    # echo 'bar+0xf00d' > /sys/kernel/debug/racehound/breakpoints
+  $ echo "something.c:82" | lines2insns test_module.ko
+  test_module:core+0x22f
 
-You can use RaceHound to monitor more than one instruction at a time, if you
-like. Just echo their locations to the 'breakpoints' file one at a time, as
-shown above.
+  $ echo "something.c:84" | lines2insns test_module.ko
+  test_module:core+0x251
 
-If you would like RaceHound to stop monitoring the instruction, prepend '-'
-to the appropriate string:
+If you are interested, say, only in writes at something.c:84, you can
+specify this as well:
 
-    # echo '-bar+0xf00d' > /sys/kernel/debug/racehound/breakpoints
+  $ echo "something.c:84:write" | lines2insns test_module.ko
+  test_module:core+0x251
 
-'cat /sys/kernel/debug/racehound/breakpoints' will show you the current
-list of monitored instructions.
+If you know the ELF sections and the offsets there for the instructions of
+interest, lines2insns can convert that to the proper format too:
+  $ echo "test_module:.text+0x251" | lines2insns --section-to-area test_module.ko
+  test_common_target:core+0x251
 
-5. Now load foo_driver and do something with it.
+  $ echo "test_module:.exit.text+0x1" | lines2insns --section-to-area test_module.ko
+  test_common_target:core+0x335
 
-6. If RaceHound detects a race, it will output a message similar to the 
-following one to the system log:
+  $ echo "test_module:.init.text+0xdd" | lines2insns --section-to-area test_module.ko
+  test_common_target:init+0xdd
 
-  [rh] Detected a data race on the memory at ffff8800377214c0 
-  between the instruction at ffffffffa0392b6d 
-    (e1000_clean+0x18d/0x950 [e1000], CPU=0, 
-     task_struct=ffff8800b061dc40, comm: "kworker/0:1") 
-  and the instruction right before ffffffffa0390b18 
-    (e1000_xmit_frame+0x928/0x1020 [e1000], CPU=1, 
-     task_struct=ffff88011a535c40, comm: "Socket Thread") 
+See lines2insns --help for more details.
 
-If foo_driver is built with debug info, you can use addr2line or a similar 
-tool to find the source lines corresponding to the conflicting instruction.
+So, suppose you would like to monitor the instructions at the following
+locations in test_module:
+  test_module:core+0x22f
+  test_module:core+0x251
+...as well as one location in the kernel proper or in a built-in module:
+  core+0x77654
 
-7. When you are through with foo_driver, unload it.
+2. Load racehound.ko if it is not loaded yet.
 
-8. Unload RaceHound.
+  insmod racehound.ko [delay=...] [delay_in_atomic=...]
+
+You can optionally specify how long to delay execution of the instructions
+to check for the conflicting memory accesses. "delay" parameter of
+"racehound" kernel module can be used for that. The value is in milliseconds.
+The default is about 5000/HZ (5 jiffies).
+
+If you would like to use a different delay for atomic context, please
+specify it in "delay_in_atomic" parameter.
+
+3. Instruct RaceHound to monitor the given instructions (as root).
+
+  echo "test_module:core+0x22f" > /sys/kernel/debug/racehound/breakpoints
+  echo "test_module:core+0x251" > /sys/kernel/debug/racehound/breakpoints
+  echo "core+0x77654" > /sys/kernel/debug/racehound/breakpoints
+
+Reading /sys/kernel/debug/racehound/breakpoints will show the list of the
+instructions to be monitored.
+
+Note that it is no longer required to load RaceHound before the analyzed
+module(s).
+
+As soon as RaceHound receives the list of instructions to monitor, it will
+check if the corresponding components of the kernel are loaded. If they are,
+the monitoring will start immediately. If a module is not loaded yet,
+RaceHound will wait for it to load and will process it after that.
+
+Different kernel components can be monitored simultaneously.
+
+To stop monitoring an instruction, you can write the same string as before
+to /sys/kernel/debug/racehound/breakpoints but with '-' prepended. Example:
+
+  echo "-core+0x77654" > /sys/kernel/debug/racehound/breakpoints
+
+4. Make the analyzed kernel code work.
+
+5. If RaceHound detects a race, it will output something like this to the
+system log (see dmesg):
+
+  [rh] Detected a data race on the memory block at ffffffffa09b936c
+  between the instruction at test_module:core+0x22f (comm: "sh")
+  and the instruction right before my_func+0x18/0x20 [test_module] (comm: "sh").
+
+or
+
+  [rh] Detected a data race on the memory block at ffffffffa09b936c
+  that is about to be accessed by the instruction at
+  test_module:core+0x251 (comm: "sh"):
+  the memory block was modified during the delay.
+
+If the race is detected only because the memory area has been modified
+during the delay, RaceHound, obviously, has no idea which code has done that
+modification. On the other hand, the hardware breakpoints report the both
+involved parties.
+
+6. If "test_module" is built with debug info, you can use addr2line or a
+similar tool to find the source lines for the conflicting access
+(my_func+0x18/0x20 in the example above).
+
+7. Unload "racehound" module when it is no longer needed. If the analyzed
+kernel components are still loaded then, RaceHound will automatically
+"detach" from them first.
+
+Notes and tips
+
+* There are only 4 hardware breakpoints available on an x86 CPU, so monitoring
+too many instructions that execute often may be pointless. The exact values
+of "too many" and "often" may vary, of course.
+
+* If the "hot code paths" are constantly monitored, the performance overhead
+may become significant as well.
+
+* If you suspect two instructions to race against each other, it is usually
+better to monitor only one of them. The reports about the races might be
+less useful otherwise: the accesses from RaceHound itself may be listed
+there.
+
+* If you try to write a location to monitor to
+/sys/kernel/debug/racehound/breakpoints and it fails, check the system log
+(dmesg), it may provide more info.
+
+On x86-64, adding a location to monitor may also fail if the kernel does not
+have the following fix:
+"kprobes/x86: Return correct length in __copy_instruction()"
+(commit c80e5c0c23ce2282476fdc64c4b5e3d3a40723fd in the mainline)
+------------------
+
+## Scenario 2: sweeping through the code
+
+Not implemented yet, work in progress.
+
+The idea is as follows. Suppose we have a list of the instructions from the
+given portion of the code, say, part of a module or of the kernel. The list
+may be quite long and monitoring all these instructions at the same time can
+be a bad idea (performance overhead, etc.).
+
+We can update the kernel part of RaceHound to provide info about which
+software breakpoints have been hit, etc. A user-space application could use
+that info to automatically start and stop monitoring the instructions from
+the list according to some strategy. This should allow to keep overhead at
+the acceptable level.
+
+TBD
+
+Note that "ma_lines" plugin for GCC 4.9+ can be used to get the list of the
+locations in the source code where memory accesses may happen (except the
+code written in assembly). lines2insns will translate it to the list of
+locations in the binary code. See ma_lines/Readme.txt.
