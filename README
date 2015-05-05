@@ -40,6 +40,46 @@ during the delay. Might help detect races that were not caught above.
 
 The found races are reported to the system log.
 
+
+# Build prerequisites
+--------------
+
+* cmake 2.8.10 or newer.
+
+* Everything that is needed to build kernel modules (kernel development
+files, etc.).
+
+* GCC C compiler and C++ compiler with C++11 support (GCC 4.9 or newer is
+preferable).
+
+* (only if you want to build "ma_lines" plugin) GCC development files needed
+to build plugins.
+
+* elfutils, libelf, libdw and their development files.
+
+# Build
+--------------
+
+  $ mkdir racehound.build
+  $ cd racehound.build
+  $ cmake path_to_racehound_sources
+  $ make
+
+To install RaceHound, you can now execute "make install" as root.
+
+Note that RaceHound is installed for the current kernel only. If you update
+or otherwise change the kernel, please rebuild RaceHound and install it
+again.
+
+# Self-tests (optional)
+--------------
+
+To build the tests provided with RaceHound, run "make build_tests" in the
+directory where RaceHound was built. Then you can run "ctest" as root there
+to run all the tests.
+
+The tests check the basic functionality of RaceHound.
+
 # Usage
 --------------
 
