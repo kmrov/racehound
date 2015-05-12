@@ -1772,7 +1772,7 @@ bp_file_open(struct inode *inode, struct file *filp)
 
 	ret = mutex_lock_killable(&swbp_mutex);
 	if (ret != 0) {
-		pr_warning("[rh] Failed to lock module_mutex\n");
+		pr_warning("[rh] Failed to lock swbp_mutex\n");
 		return ret;
 	}
 
