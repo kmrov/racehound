@@ -15,6 +15,8 @@ test_common_target:core+0x22f
 test_common_target:core+0x233
 test_common_target:core+0x251
 test_common_target:core+0x259
+test_common_target:core+0x261
+test_common_target:core+0x281
 test_common_target:init+0x153
 test_common_target:init+0xe
 test_common_target:init+0x11
