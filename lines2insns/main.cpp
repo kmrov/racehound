@@ -881,8 +881,8 @@ find_insns(Elf *e, string src_file, int line, EAccessType at)
 			}
 			found = true;
 
-			decode_and_filter(offset, data, sec, src_file, line,
-					  at);
+			decode_and_filter(offset, data, sec,
+					  string(file), line, at);
 			break;
 		}
 
