@@ -97,6 +97,13 @@
 #include "config.h"
 /* ====================================================================== */
 
+#if defined(KPROBE_INSN_SLOT_SIZE)
+# define RH_INSN_SLOT_SIZE KPROBE_INSN_SLOT_SIZE
+#else
+# define RH_INSN_SLOT_SIZE MAX_INSN_SIZE
+#endif
+/* ====================================================================== */
+
 static struct dentry *debugfs_dir_dentry = NULL;
 static const char *debugfs_dir_name = "racehound";
 
@@ -565,7 +572,7 @@ arm_swbp(struct swbp *swbp)
 
 	/* The insn and the jump near relative following it must fit into
 	 * the slot. */
-	if (len + RH_JMP_REL_SIZE > MAX_INSN_SIZE) {
+	if (len + RH_JMP_REL_SIZE > RH_INSN_SLOT_SIZE) {
 		pr_warning("[rh] "
 "Unable to handle the instruction at %s: it is too long (%d byte(s)).\n",
 			swbp_to_string(swbp), len);
@@ -2216,7 +2223,7 @@ rh_module_init(void)
 	int ret = 0;
 	/* Better to have Kprobes' insn slots of 15 bytes in size or
 	 * larger. */
-	BUILD_BUG_ON(MAX_INSN_SIZE < 15);
+	BUILD_BUG_ON(RH_INSN_SLOT_SIZE < 15);
 
 	init_waitqueue_head(&waitq);
 
