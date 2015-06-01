@@ -209,6 +209,10 @@ kernel components are still loaded then, RaceHound will automatically
 
 Notes and tips
 
+* If the kernel is built with CONFIG_PREEMPT=y, it may help make the system
+more responsive when using RaceHound. Especially, - if you use the delays in
+seconds or longer.
+
 * There are only 4 hardware breakpoints available on an x86 CPU, so monitoring
 too many instructions that execute often may be pointless. The exact values
 of "too many" and "often" may vary, of course.
