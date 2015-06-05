@@ -1,0 +1,41 @@
+From f58fd6ef8e0876ef459517a27b0544930fa2dcdb Mon Sep 17 00:00:00 2001
+From: Eugene Shatokhin <eugene.shatokhin@rosalab.ru>
+Date: Fri, 29 May 2015 17:04:40 +0300
+Subject: [PATCH 1/2] kprobes/x86: boost: Fix checking if there is enough room
+ for a jump
+
+Kprobes' "boost" feature allows to avoid single-stepping in some cases,
+along with its overhead. It needs a relative jump placed in the insn
+slot right after the instruction. So the length of the instruction plus
+5 (the length of the near relative unconditional jump) must not exceed
+the length of the slot.
+
+However, the code currently checks if that sum is strictly less than
+the length of the slot. So "boost" cannot be used for the instructions
+of 10 bytes in size (with MAX_INSN_SIZE == 15), like
+"movabs $0x45525f4b434f4c43,%rax" (48 b8 43 4c 4f 43 4b 5f 52 45),
+"movl $0x1,0xf8dd(%rip)"          (c7 05 dd f8 00 00 01 00 00 00), etc.
+
+This patch fixes that conditional.
+
+Signed-off-by: Eugene Shatokhin <eugene.shatokhin@rosalab.ru>
+---
+ arch/x86/kernel/kprobes/core.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/x86/kernel/kprobes/core.c b/arch/x86/kernel/kprobes/core.c
+index 1deffe6..0a42b76 100644
+--- a/arch/x86/kernel/kprobes/core.c
++++ b/arch/x86/kernel/kprobes/core.c
+@@ -881,7 +881,7 @@ static void resume_execution(struct kprobe *p, struct pt_regs *regs,
+ 
+ 	if (p->ainsn.boostable == 0) {
+ 		if ((regs->ip > copy_ip) &&
+-		    (regs->ip - copy_ip) + 5 < MAX_INSN_SIZE) {
++		    (regs->ip - copy_ip) + 5 <= MAX_INSN_SIZE) {
+ 			/*
+ 			 * These instructions can be executed directly if it
+ 			 * jumps back to correct address.
+-- 
+2.3.2
+

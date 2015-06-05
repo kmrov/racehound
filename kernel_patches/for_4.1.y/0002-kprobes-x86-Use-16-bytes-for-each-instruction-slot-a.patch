@@ -1,0 +1,122 @@
+From 97e1c91c1cbaeeb900bd9207465c9479e8d9ec91 Mon Sep 17 00:00:00 2001
+From: Eugene Shatokhin <eugene.shatokhin@rosalab.ru>
+Date: Wed, 3 Jun 2015 10:10:54 +0300
+Subject: [PATCH] kprobes/x86: Use 16 bytes for each instruction slot again
+
+Commit 91e5ed49fca0 ("x86/asm/decoder: Fix and enforce max instruction
+size in the insn decoder") has changed MAX_INSN_SIZE from 16 to 15 bytes
+on x86.
+
+As a side effect, the slots Kprobes use to store the instructions became
+1 byte shorter. This is unfortunate because, for example, the Kprobes'
+"boost" feature can not be used now for the instructions of length 11,
+like a quite common kind of MOV:
+* movq $0xffffffffffffffff,-0x3fe8(%rax) (48 c7 80 18 c0 ff ff ff ff ff ff)
+* movq $0x0,0x88(%rdi)                   (48 c7 87 88 00 00 00 00 00 00 00)
+and so on.
+
+This patch makes the insn slots 16 bytes long, like they were before
+while keeping MAX_INSN_SIZE intact.
+
+Other tools may benefit from this change as well.
+
+Changes in v2:
+* Explained in the comments what KPROBE_INSN_SLOT_SIZE is and why it may
+  be larger than MAX_INSN_SIZE.
+* Added a compile-time check that KPROBE_INSN_SLOT_SIZE is not less than
+  MAX_INSN_SIZE.
+
+Signed-off-by: Eugene Shatokhin <eugene.shatokhin@rosalab.ru>
+---
+ arch/x86/include/asm/kprobes.h | 15 +++++++++++++++
+ arch/x86/kernel/kprobes/core.c |  2 +-
+ kernel/kprobes.c               | 20 ++++++++++++++++++--
+ 3 files changed, 34 insertions(+), 3 deletions(-)
+
+diff --git a/arch/x86/include/asm/kprobes.h b/arch/x86/include/asm/kprobes.h
+index 4421b5d..ab6e6a0 100644
+--- a/arch/x86/include/asm/kprobes.h
++++ b/arch/x86/include/asm/kprobes.h
+@@ -28,6 +28,21 @@
+ 
+ #define  __ARCH_WANT_KPROBES_INSN_SLOT
+ 
++/*
++ * The size of the instruction slot is greater than the maximum length of
++ * an instruction (15 bytes) for Kprobes to be able to use "boost" for
++ * longer instructions.
++ *
++ * "Boost" allows to avoid single-stepping over an instruction if the Kprobe
++ * has no post handler. A jump to the next instruction is placed after the
++ * copied instruction in the slot for that to work.
++ *
++ * The length of the relative jump instruction is 5 bytes. With the slot
++ * size of 16, "boost" can be used for the instructions up to 11 bytes long,
++ * including rather common kinds of "MOV r/m64, imm32" (opcode 0xc7).
++ */
++#define KPROBE_INSN_SLOT_SIZE 16
++
+ struct pt_regs;
+ struct kprobe;
+ 
+diff --git a/arch/x86/kernel/kprobes/core.c b/arch/x86/kernel/kprobes/core.c
+index 0a42b76..1067f90 100644
+--- a/arch/x86/kernel/kprobes/core.c
++++ b/arch/x86/kernel/kprobes/core.c
+@@ -881,7 +881,7 @@ static void resume_execution(struct kprobe *p, struct pt_regs *regs,
+ 
+ 	if (p->ainsn.boostable == 0) {
+ 		if ((regs->ip > copy_ip) &&
+-		    (regs->ip - copy_ip) + 5 <= MAX_INSN_SIZE) {
++		    (regs->ip - copy_ip) + 5 <= KPROBE_INSN_SLOT_SIZE) {
+ 			/*
+ 			 * These instructions can be executed directly if it
+ 			 * jumps back to correct address.
+diff --git a/kernel/kprobes.c b/kernel/kprobes.c
+index c90e417..92788a4 100644
+--- a/kernel/kprobes.c
++++ b/kernel/kprobes.c
+@@ -57,7 +57,6 @@
+ #define KPROBE_HASH_BITS 6
+ #define KPROBE_TABLE_SIZE (1 << KPROBE_HASH_BITS)
+ 
+-
+ /*
+  * Some oddball architectures like 64bit powerpc have function descriptors
+  * so this must be overridable.
+@@ -90,6 +89,23 @@ static raw_spinlock_t *kretprobe_table_lock_ptr(unsigned long hash)
+ static LIST_HEAD(kprobe_blacklist);
+ 
+ #ifdef __ARCH_WANT_KPROBES_INSN_SLOT
++
++/*
++ * An instruction slot contains a copy of the probed instruction, relocated
++ * if needed. In some cases, it may be necessary to place additional
++ * instructions into that slot, so, the size of the slot may be larger than
++ * the maximum length of an instruction.
++ * Currently, the slots larger than MAX_INSN_SIZE may only be needed on x86
++ * to implement Kprobe "boost". Other architectures do not need to define
++ * KPROBE_INSN_SLOT_SIZE explicitly.
++ */
++#ifndef KPROBE_INSN_SLOT_SIZE
++#define KPROBE_INSN_SLOT_SIZE MAX_INSN_SIZE
++#endif
++#if (KPROBE_INSN_SLOT_SIZE < MAX_INSN_SIZE)
++#error "Size of an instruction slot must not be less than MAX_INSN_SIZE."
++#endif
++
+ /*
+  * kprobe->ainsn.insn points to the copy of the instruction to be
+  * single-stepped. x86_64, POWER4 and above have no-exec support and
+@@ -135,7 +151,7 @@ struct kprobe_insn_cache kprobe_insn_slots = {
+ 	.alloc = alloc_insn_page,
+ 	.free = free_insn_page,
+ 	.pages = LIST_HEAD_INIT(kprobe_insn_slots.pages),
+-	.insn_size = MAX_INSN_SIZE,
++	.insn_size = KPROBE_INSN_SLOT_SIZE,
+ 	.nr_garbage = 0,
+ };
+ static int collect_garbage_slots(struct kprobe_insn_cache *c);
+-- 
+2.3.2
+
