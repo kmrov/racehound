@@ -237,6 +237,10 @@ struct swbp
 	/* Offset of the insn to set the BP to in the core or init area. */
 	unsigned int offset;
 
+	/* If non-zero, this value will be used as a delay rather than the
+	 * module parameters 'delay' or 'delay_in_atomic'. */
+	unsigned long delay;
+
 	/* A string represenation of this BP - for error reporting, etc. */
 	char *str_repr;
 };
@@ -303,7 +307,8 @@ swbp_to_string(const struct swbp *swbp)
 /* [NB] Might sleep.
  * Call this function with swbp_mutex locked. */
 static struct swbp *
-create_swbp(struct swbp_group *grp, int is_init, unsigned int offset)
+create_swbp(struct swbp_group *grp, int is_init, unsigned int offset,
+	    unsigned long swbp_delay)
 {
 	struct swbp *swbp;
 	int len;
@@ -317,6 +322,7 @@ create_swbp(struct swbp_group *grp, int is_init, unsigned int offset)
 	swbp->armed = false;
 	swbp->is_init = is_init;
 	swbp->offset = offset;
+	swbp->delay = swbp_delay;
 	swbp->grp = grp;
 
 	len = snprintf_swbp(NULL, 0, swbp) + 1;
@@ -1548,7 +1554,10 @@ rh_do_before_insn(void)
 	u8 data[RH_MAX_REP_READ_SIZE];
 	size_t nbytes_to_check;
 	int race_found;
-	unsigned long actual_delay = (in_atomic() ? delay_in_atomic : delay);
+	unsigned long actual_delay = swbp_hit->swbp->delay;
+
+	if (!actual_delay)
+		actual_delay = (in_atomic() ? delay_in_atomic : delay);
 
 	ret = rh_fill_ma_info(&mi, swbp_hit->swbp->rh_insn, &swbp_hit->regs,
 			      swbp_hit->swbp->base_size);
@@ -1851,9 +1860,11 @@ bp_file_read(struct file *filp, char __user *buf, size_t count,
 
 /* Parses the string specifying a breakpoint, checks if the format is valid.
  * The format is
- * 	[<module>:]{init|core}+0xoffset
+ * 	[<module>:]{init|core}+0xoffset[,delay=<value>]
  *
- * 'str' - the string to be parsed.
+ * 'str' - the string to be parsed. Note that the function may change the
+ * contents of the string.
+ *
  * If the name of the module is specified in the string, a newly allocated
  * copy of the name is returned. The caller is responsible for freeing it
  * when it is no longer needed.
@@ -1868,21 +1879,27 @@ bp_file_read(struct file *filp, char __user *buf, size_t count,
  * If the BP is for "init" area, non-zero will be returned in '*is_init',
  * 0 otherwise.
  *
- * The offset will be returned in '*offset'. */
+ * The offset will be returned in '*offset'. The delay to be used for the
+ * insn the BP is set to - in '*swbp_delay' (0 if not specified). */
 static char *
-parse_bp_string(const char *str, int *is_init, unsigned int *offset)
+parse_bp_string(char *str, int *is_init, unsigned int *offset,
+		unsigned long *swbp_delay)
 {
 	char *p;
 	char *module_name = NULL;
 	const char *orig = str;
 	static char str_init[] = "init";
 	static char str_core[] = "core";
+	static char str_delay[] = ",delay=";
 	unsigned long val;
 	int err = -EINVAL;
 
 	BUG_ON(str == NULL);
 	BUG_ON(is_init == NULL);
 	BUG_ON(offset == NULL);
+	BUG_ON(swbp_delay == NULL);
+
+	*swbp_delay = 0;
 
 	p = strchr(str, ':');
 	if (p == str)
@@ -1919,6 +1936,10 @@ parse_bp_string(const char *str, int *is_init, unsigned int *offset)
 	if (str[0] != '0')
 		goto invalid_str;
 
+	p = strstr(str, str_delay);
+	if (p != NULL)
+		*p = 0;
+
 	err = kstrtoul(str, 16, &val);
 	if (err)
 		goto invalid_str;
@@ -1927,6 +1948,18 @@ parse_bp_string(const char *str, int *is_init, unsigned int *offset)
 	if ((unsigned long)*offset != val) {
 		err = -ERANGE;
 		goto invalid_str;
+	}
+
+	if (p != NULL) { /* delay=... */
+		str = p + (sizeof(str_delay) - 1);
+		if (*str == 0) {
+			err = -EINVAL;
+			goto invalid_str;
+		}
+
+		err = kstrtoul(str, 10, swbp_delay);
+		if (err)
+			goto invalid_str;
 	}
 
 	return module_name;
@@ -1939,7 +1972,7 @@ invalid_str:
 
 static int
 process_kernel_address(struct swbp_group *grp, int is_init,
-		       unsigned int offset)
+		       unsigned int offset, unsigned long swbp_delay)
 {
 	int ret;
 	struct swbp *swbp;
@@ -1957,7 +1990,7 @@ process_kernel_address(struct swbp_group *grp, int is_init,
 		return -ERANGE;
 	}
 
-	swbp = create_swbp(grp, is_init, offset);
+	swbp = create_swbp(grp, is_init, offset, swbp_delay);
 	if (!swbp)
 		return -ENOMEM;
 
@@ -1978,7 +2011,7 @@ process_kernel_address(struct swbp_group *grp, int is_init,
  * appear and disappear while this function is working. */
 static int
 process_module_address(struct swbp_group *grp, int is_init,
-		       unsigned int offset)
+		       unsigned int offset, unsigned long swbp_delay)
 {
 	int ret;
 	struct swbp *swbp;
@@ -1990,7 +2023,7 @@ process_module_address(struct swbp_group *grp, int is_init,
 		 *
 		 * Same for the BPs for the init area of the module, even if
 		 * the module is now loaded. */
-		swbp = create_swbp(grp, is_init, offset);
+		swbp = create_swbp(grp, is_init, offset, swbp_delay);
 		if (!swbp)
 			return -ENOMEM;
 		return 0;
@@ -2001,7 +2034,7 @@ process_module_address(struct swbp_group *grp, int is_init,
 		return ret;
 
 	/* The BP is valid. */
-	swbp = create_swbp(grp, is_init, offset);
+	swbp = create_swbp(grp, is_init, offset, swbp_delay);
 	if (!swbp)
 		return -ENOMEM;
 
@@ -2037,6 +2070,7 @@ bp_file_write(struct file *filp, const char __user *buf,
 	int is_init = 0;
 	unsigned int offset = 0;
 	char *module_name = NULL;
+	unsigned long swbp_delay = 0;
 	int remove = 0;
 	int ret;
 	struct swbp_group *grp;
@@ -2066,7 +2100,7 @@ bp_file_write(struct file *filp, const char __user *buf,
 		str++;
 	}
 
-	module_name = parse_bp_string(str, &is_init, &offset);
+	module_name = parse_bp_string(str, &is_init, &offset, &swbp_delay);
 	if (IS_ERR(module_name)) {
 		ret = PTR_ERR(module_name);
 		goto out_str;
@@ -2129,10 +2163,14 @@ bp_file_write(struct file *filp, const char __user *buf,
 	}
 
 	/* [NB] Use grp->module_name rather than module_name from now on. */
-	if (grp->module_name == NULL)
-		ret = process_kernel_address(grp, is_init, offset);
-	else
-		ret = process_module_address(grp, is_init, offset);
+	if (grp->module_name == NULL) {
+		ret = process_kernel_address(grp, is_init, offset,
+					     swbp_delay);
+	}
+	else {
+		ret = process_module_address(grp, is_init, offset,
+					     swbp_delay);
+	}
 	if (ret)
 		goto out_unlock;
 

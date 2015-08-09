@@ -92,7 +92,7 @@ instructions in the kernel code. The locations of these instructions should
 be written to /sys/kernel/debug/racehound/breakpoints in the following
 format:
 
-  [<module_name>:]{init|core}+0xoffset
+  [<module_name>:]{init|core}+0xoffset[,delay=<value>]
 
 If <module_name> is not specified, the kernel or a built-in module is
 assumed.
@@ -102,6 +102,11 @@ module in memory. See module_init and module_core in struct module. Dealing
 with the ELF sections in the kernel has its difficulties, same for the
 addresses and sizes of the functions, so RaceHound uses "init" and "core"
 areas instead.
+
+"delay" can be used to set the length of the delay for the given monitored
+instruction when a software breakpoint hits. If it is not specified, "delay"
+parameter of "racehound" kernel module will be used (or "delay_in_atomic"
+in atomic context, if set). The value is in milliseconds.
 
 lines2insns tool from this project can help prepare the location strings in
 the correct format.
@@ -158,7 +163,11 @@ specify it in "delay_in_atomic" parameter.
 
   echo "test_module:core+0x22f" > /sys/kernel/debug/racehound/breakpoints
   echo "test_module:core+0x251" > /sys/kernel/debug/racehound/breakpoints
-  echo "core+0x77654" > /sys/kernel/debug/racehound/breakpoints
+  echo "core+0x77654,delay=50" > /sys/kernel/debug/racehound/breakpoints
+
+Note that the execution of the instruction at "core+0x77654" will be delayed
+by 50 milliseconds ("delay=50") no matter which global settings for delays
+RaceHound has.
 
 Reading /sys/kernel/debug/racehound/breakpoints will show the list of the
 instructions to be monitored.
