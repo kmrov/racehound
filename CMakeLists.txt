@@ -19,7 +19,7 @@ endif ()
 set(RH_PACKAGE_NAME "RaceHound")
 
 set(RH_VERSION_MAJOR 1)
-set(RH_VERSION_MINOR 0)
+set(RH_VERSION_MINOR 1)
 
 set(RH_PACKAGE_VERSION "${RH_VERSION_MAJOR}.${RH_VERSION_MINOR}")
 #######################################################################
