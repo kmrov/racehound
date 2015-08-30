@@ -79,6 +79,7 @@
 #include <linux/hardirq.h>
 
 #include <linux/debugfs.h>
+#include <linux/poll.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/kallsyms.h>
@@ -88,6 +89,8 @@
 #include <linux/kprobes.h>
 #include <linux/perf_event.h>
 #include <linux/hw_breakpoint.h>
+
+#include <linux/circ_buf.h>
 
 /* Do not #include <common/...> or other headers of the insn decoder here.
  * They may conflict with the ones from the kernel #included via kprobes.h.
@@ -107,11 +110,21 @@
 static struct dentry *debugfs_dir_dentry = NULL;
 static const char *debugfs_dir_name = "racehound";
 
-/* Counter for the found races */
+/* Counter for the found races.
+ * Write 0 to this file to reset the counter. */
 static struct dentry *race_counter_file = NULL;
 static atomic_t race_counter = ATOMIC_INIT(0);
 
 struct dentry *bp_file = NULL;
+
+/* This file ("events") shows the software breakpoints that have hit.
+ * The user space can use poll/epoll/select on it.
+ * The items are stored in a circular buffer (see below). The items are
+ * comsumed when read, freeing the space in the buffer. When the buffer is
+ * full, the new events are discarded. "events_lost" file will show the
+ * number of such discarded events. */
+static struct dentry *events_file = NULL;
+static struct dentry *events_lost_file = NULL;
 /* ====================================================================== */
 
 /* The maximum size of the memory area to check with repeated reads. */
@@ -368,6 +381,275 @@ destroy_swbp(struct kref *kref)
 	kfree(swbp->str_repr);
 	kfree(swbp);
 }
+/* ====================================================================== */
+
+/* The maximum number of events that can be stored in the circular buffer
+ * and shown in "events" file. Must be a power of 2.
+ *
+ * See also: Documentation/circular-buffers.txt. */
+#define RH_MAX_EVENTS_STORED 512
+struct event_buffer {
+	unsigned int head; /* new data are put here */
+	unsigned int tail; /* the data are read from here */
+	char **buf;
+};
+static struct event_buffer events;
+
+/* Serializes the code reading and consuming the events. */
+static DEFINE_MUTEX(event_consumer_mutex);
+
+/* Serializes the code producing the events. */
+static DEFINE_SPINLOCK(event_producer_lock);
+
+/* A wait queue for the reader (consumer) to wait on until new events
+ * become available. */
+static wait_queue_head_t eventq;
+
+/* 1 if the file is available, that is can been opened, <= 0 if it is open
+ * already. */
+static atomic_t events_file_available = ATOMIC_INIT(1);
+
+/* The number of the lost events, i.e. the events discarded because the
+ * buffer was full. */
+static atomic_t events_lost = ATOMIC_INIT(0);
+
+static int __init
+event_buffer_init(struct event_buffer *e)
+{
+	e->head = 0;
+	e->tail = 0;
+	e->buf = kzalloc(sizeof(e->buf[0]) * RH_MAX_EVENTS_STORED,
+			 GFP_KERNEL);
+	if (!e->buf)
+		return -ENOMEM;
+	return 0;
+}
+
+/* The events producers and consumers must not be running when this function
+ * is called.  */
+static void
+event_buffer_destroy(struct event_buffer *e)
+{
+	int i;
+	if (!e->buf)
+		return;
+
+	for (i = 0; i < RH_MAX_EVENTS_STORED; ++i)
+		kfree(e->buf[i]);
+
+	kfree(e->buf);
+}
+
+/* This helper adds an event (a SW BP was hit) to the buffer. Should be used
+ * by the producers of the events. A copy of the string representation of
+ * the SW BP is created for that, so the original SW BP may safely disappear
+ * while this event is still in the buffer.
+ *
+ * May be called in atomic context too. */
+static void
+add_event(struct event_buffer *e, const char *str_swbp)
+{
+	unsigned long flags;
+	unsigned int head;
+	unsigned int tail;
+	char *str;
+
+	BUG_ON(str_swbp == NULL);
+
+	spin_lock_irqsave(&event_producer_lock, flags);
+	head = e->head; /* The producer controls 'head' index. */
+	tail = ACCESS_ONCE(e->tail);
+
+	if (CIRC_SPACE(head, tail, RH_MAX_EVENTS_STORED) < 1) {
+		/* no space left, discard the event */
+		atomic_inc(&events_lost);
+		goto out;
+	}
+
+	str = kstrdup(str_swbp, GFP_ATOMIC);
+	if (!str) {
+		pr_debug("[rh] add_event: out of memory.\n");
+		atomic_inc(&events_lost);
+		goto out;
+	}
+
+	e->buf[head] = str;
+	smp_store_release(&e->head, (head + 1) & (RH_MAX_EVENTS_STORED - 1));
+
+	/* Documentation/circular-buffers.txt:
+	 * wake_up() will make sure that the head is committed before
+	 * waking anyone up. */
+	wake_up(&eventq);
+
+out:
+	spin_unlock_irqrestore(&event_producer_lock, flags);
+}
+
+/* The event currently being read. The terminating 0 is replaced with '\n'.
+ * 'pos' - the index where to start reading, 'avail' - how many bytes can be
+ * read, at most (including the terminating '\n'). */
+struct read_event {
+	char *str;
+	size_t pos;
+	size_t avail;
+};
+
+/* Make sure the file cannot be opened if it is already open.
+ * Note that it does not guarantee that no operations with this file will
+ * execute simultaneously. If an application is multithreaded, for
+ * example, these threads may be able to operate on this file concurrently.
+ * Still, this "single open" technique gives some protection which may help,
+ * if (unintentionally) several user-space readers are launched. */
+static int
+events_file_open(struct inode *inode, struct file *filp)
+{
+	struct read_event *rev;
+
+	if (!atomic_dec_and_test(&events_file_available)) {
+		/* Some process has already opened this file. */
+		atomic_inc(&events_file_available);
+		return -EBUSY;
+	}
+
+	rev = kzalloc(sizeof(*rev), GFP_KERNEL);
+	if (!rev) {
+		atomic_inc(&events_file_available);
+		return -ENOMEM;
+	}
+
+	filp->private_data = rev;
+	return nonseekable_open(inode, filp);
+}
+
+static int
+events_file_release(struct inode *inode, struct file *filp)
+{
+	struct read_event *rev = filp->private_data;
+	if (rev) {
+		kfree(rev->str); /* in case it was not read to the end */
+		kfree(rev);
+	}
+
+	/* Make the file available again. */
+	atomic_inc(&events_file_available);
+	return 0;
+}
+
+static ssize_t
+events_file_read(struct file *filp, char __user *buf, size_t count,
+	loff_t *f_pos)
+{
+	int err;
+	ssize_t ret = 0;
+	struct read_event *rev = filp->private_data;
+
+	err = mutex_lock_killable(&event_consumer_mutex);
+	if (err != 0) {
+		pr_warning("[rh] Failed to lock event_consumer_mutex\n");
+		return -EINTR;
+	}
+
+	/* We cannot assume how many bytes the reader would like to get.
+	 * So we store the event currently being read in filp->private_data
+	 * along with the current position in it. */
+	if (!rev->str) {
+		unsigned int head;
+		unsigned int tail;
+		/* All previous events (if any) have been fully read.
+		 * Try to get the next one. */
+
+		/* Read the index first. */
+		head = smp_load_acquire(&events.head);
+		tail = events.tail;
+
+		if (CIRC_CNT(head, tail, RH_MAX_EVENTS_STORED) >= 1) {
+			rev->str = events.buf[tail];
+			events.buf[tail] = NULL;
+			if (!rev->str) {
+				pr_warning(
+			"[rh] events_file_read: unexpected empty event.\n");
+				ret = -EFAULT;
+				goto out;
+			}
+
+			rev->pos = 0;
+			rev->avail = strlen(rev->str);
+			/* Let it appear as one event per line. */
+			rev->str[rev->avail] = '\n';
+			++rev->avail;
+
+			/* Make sure the reading of events.buf[tail]
+			 * completes before the update of 'tail' is seen. */
+			smp_store_release(
+				&events.tail,
+				(tail + 1) & (RH_MAX_EVENTS_STORED - 1));
+		}
+		else {
+			ret = -EAGAIN;
+			goto out;
+		}
+	}
+
+	/* Now we have something that can be read. */
+	if (count > rev->avail)
+		count = rev->avail;
+
+	if (copy_to_user(buf, &(rev->str[rev->pos]), count) != 0) {
+		ret = -EFAULT;
+		goto out;
+	}
+
+	rev->pos += count;
+	rev->avail -= count;
+	if (!rev->avail) {
+		/* Consumed the whole string, free it. */
+		kfree(rev->str);
+		rev->str = NULL;
+	}
+
+	*f_pos += count;
+	ret = count;
+out:
+	mutex_unlock(&event_consumer_mutex);
+	return ret;
+}
+
+static unsigned int
+events_file_poll(struct file *filp, poll_table *wait)
+{
+	unsigned int ret = 0;
+	unsigned int err;
+	unsigned int head;
+	unsigned int tail;
+
+	poll_wait(filp, &eventq, wait);
+
+	err = mutex_lock_killable(&event_consumer_mutex);
+	if (err != 0) {
+		pr_warning("[rh] Failed to lock event_consumer_mutex\n");
+		return ret;
+	}
+
+	/* We only check here if there are events available for reading
+	 * but do not read them. If we find there are no events but some
+	 * actually become available right now, it is OK.
+	 * No additional barriers are needed. */
+	head = ACCESS_ONCE(events.head);
+	tail = events.tail; /* The consumer controls 'tail' index. */
+	if (CIRC_CNT(head, tail, RH_MAX_EVENTS_STORED) >= 1)
+		ret = POLLIN | POLLRDNORM;
+
+	mutex_unlock(&event_consumer_mutex);
+	return ret;
+}
+
+static const struct file_operations events_file_ops = {
+	.owner 		= THIS_MODULE,
+	.open 		= events_file_open,
+	.release 	= events_file_release,
+	.read 		= events_file_read,
+	.poll		= events_file_poll,
+};
 /* ====================================================================== */
 
 /* Kprobe's pre-handler. Returns 1 like setjmp_pre_handler() for Jprobes to
@@ -1651,6 +1933,9 @@ rh_do_before_insn(void)
 		 * task->comm for that task here without additional locks.*/
 		atomic_inc(&race_counter);
 	}
+
+	/* Let the user space know the SW BP was hit and processed. */
+	add_event(&events, swbp_to_string(swbp_hit->swbp));
 out:
 	/* Let the copied insn in the Kprobe's slot execute now. */
 	return (unsigned long)swbp_hit->swbp->kp.ainsn.insn;
@@ -1695,85 +1980,6 @@ rh_do_after_insn(void)
 	/* Pass control to the next insn in the original code. */
 	return addr_next_insn;
 }
-/* ====================================================================== */
-
-static int
-race_counter_file_open(struct inode *inode, struct file *filp)
-{
-	char* str;
-	int len;
-	int value = atomic_read(&race_counter);
-
-	len = snprintf(NULL, 0, "%d\n", value) + 1;
-	str = kzalloc(len, GFP_KERNEL);
-	if (str == NULL)
-		return -ENOMEM;
-
-	snprintf(str, len, "%d\n", value);
-	filp->private_data = str;
-	return nonseekable_open(inode, filp);
-}
-
-static ssize_t
-race_counter_file_read(struct file *filp, char __user *buf, size_t count,
-		       loff_t *f_pos)
-{
-	const char* str = filp->private_data;
-	size_t size;
-	loff_t pos = *f_pos;
-
-	if (str == NULL)
-		return -EINVAL;
-
-	size = strlen(str);
-	if (pos < 0 || pos > size)
-		return -EINVAL;
-
-	/* EOF reached or 0 bytes requested */
-	if (count == 0 || pos == size)
-		return 0;
-
-	if(count + pos > size)
-		count = size - pos;
-
-	if (copy_to_user(buf, &str[pos], count) != 0)
-		return -EFAULT;
-
-	*f_pos += count;
-	return count;
-}
-
-/* Reset the counter to 0 if the user writes something to this file. */
-static ssize_t
-race_counter_file_write(struct file *filp, const char __user *buffer,
-			size_t count, loff_t *f_pos)
-{
-	loff_t pos = *f_pos;
-
-	/* Only writing from the start is allowed. */
-	if (pos != 0)
-		return -EINVAL;
-
-	atomic_set(&race_counter, 0);
-
-	*f_pos += count;
-	return count;
-}
-
-static int
-race_counter_file_release(struct inode *inode, struct file *filp)
-{
-	kfree(filp->private_data);
-	return 0;
-}
-
-struct file_operations race_counter_file_ops = {
-	.owner = THIS_MODULE,
-	.open = race_counter_file_open,
-	.read = race_counter_file_read,
-	.write = race_counter_file_write,
-	.release = race_counter_file_release,
-};
 /* ====================================================================== */
 
 static int
@@ -2255,6 +2461,57 @@ find_kernel_api(void)
 	return 0;
 }
 
+static void
+remove_debugfs_files(void)
+{
+	if (race_counter_file)
+		debugfs_remove(race_counter_file);
+	if (bp_file)
+		debugfs_remove(bp_file);
+	if (events_file)
+		debugfs_remove(events_file);
+	if (events_lost_file)
+		debugfs_remove(events_lost_file);
+}
+
+static int __init
+create_debugfs_files(void)
+{
+	const char *name = "ERROR";
+
+	name = "breakpoints";
+	bp_file = debugfs_create_file(
+		name, S_IRUGO | S_IWUGO, debugfs_dir_dentry, NULL,
+		&bp_file_ops);
+	if (bp_file == NULL)
+		goto fail;
+
+	name = "race_count";
+	race_counter_file = debugfs_create_atomic_t(
+		name, S_IRUGO | S_IWUGO, debugfs_dir_dentry, &race_counter);
+	if (race_counter_file == NULL)
+		goto fail;
+
+	name = "events";
+	events_file = debugfs_create_file(
+		name, S_IRUGO, debugfs_dir_dentry, NULL, &events_file_ops);
+	if (events_file == NULL)
+		goto fail;
+
+	name = "events_lost";
+	events_lost_file = debugfs_create_atomic_t(
+		name, S_IRUGO, debugfs_dir_dentry, &events_lost);
+	if (events_lost_file == NULL)
+		goto fail;
+
+	return 0;
+fail:
+	pr_warning("[rh] Failed to create file \"%s\" in debugfs.\n",
+		   name);
+	remove_debugfs_files();
+	return -ENOMEM;
+}
+
 static int __init
 rh_module_init(void)
 {
@@ -2264,6 +2521,7 @@ rh_module_init(void)
 	BUILD_BUG_ON(RH_INSN_SLOT_SIZE < 15);
 
 	init_waitqueue_head(&waitq);
+	init_waitqueue_head(&eventq);
 
 	if (delay == 0)
 		delay = jiffies_to_msecs(5);
@@ -2292,43 +2550,34 @@ rh_module_init(void)
 		goto out_hw;
 	}
 
+	ret = event_buffer_init(&events);
+	if (ret != 0) {
+		pr_warning("[rh] Failed to initialize the event buffer.\n");
+		goto out_wq;
+	}
+
 	debugfs_dir_dentry = debugfs_create_dir(debugfs_dir_name, NULL);
 	if (IS_ERR(debugfs_dir_dentry)) {
 		pr_warning("[rh] Debugfs is not supported\n");
 		ret = -ENODEV;
-		goto out_wq;
+		goto out_events;
 	}
 
 	if (debugfs_dir_dentry == NULL) {
 		pr_warning(
 			"[rh] Failed to create a directory in debugfs\n");
 		ret = -EINVAL;
-		goto out_wq;
+		goto out_events;
 	}
 
-	bp_file = debugfs_create_file("breakpoints", S_IRUGO,
-				      debugfs_dir_dentry, NULL,
-				      &bp_file_ops);
-	if (bp_file == NULL)
-	{
-		pr_warning(
-	"[rh] Failed to create file \"breakpoints\" in debugfs.");
+	ret = create_debugfs_files();
+	if (ret)
 		goto out_rmdir;
-	}
-
-	race_counter_file = debugfs_create_file("race_count", S_IRUGO,
-		debugfs_dir_dentry, NULL, &race_counter_file_ops);
-	if (race_counter_file == NULL)
-	{
-		pr_warning(
-	"[rh] Failed to the create file \"race_count\" in debugfs.");
-		goto out_rmdir;
-	}
 
 	ret = register_module_notifier(&module_event_nb);
 	if (ret != 0) {
 		pr_warning("[rh] Failed to register module notifier.\n");
-		goto out_rmcounter;
+		goto out_rmfiles;
 	}
 
 	/* Now that everything is ready, enable handling of the requests to
@@ -2346,10 +2595,12 @@ rh_module_init(void)
 
 out_unreg_module:
 	unregister_module_notifier(&module_event_nb);
-out_rmcounter:
-	debugfs_remove(race_counter_file);
+out_rmfiles:
+	remove_debugfs_files();
 out_rmdir:
 	debugfs_remove(debugfs_dir_dentry);
+out_events:
+	event_buffer_destroy(&events);
 out_wq:
 	destroy_workqueue(wq);
 out_hw:
@@ -2417,9 +2668,9 @@ rh_module_exit(void)
 	cleanup_hw_breakpoints();
 
 	/* This is done only after all SW BPs have been removed. */
-	debugfs_remove(race_counter_file);
-	debugfs_remove(bp_file);
+	remove_debugfs_files();
 	debugfs_remove(debugfs_dir_dentry);
+	event_buffer_destroy(&events);
 
 	pr_info("[rh] RaceHound has been unloaded.\n");
 }
