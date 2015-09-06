@@ -38,7 +38,8 @@ during the delay. Might help detect races that were not caught above.
 
 8. Let the execution continue as usual.
 
-The found races are reported to the system log.
+The found races are reported to the system log and to racehound/events file
+in debugfs.
 
 
 # Build prerequisites
@@ -252,10 +253,15 @@ may be quite long and monitoring all these instructions at the same time can
 be a bad idea (performance overhead, etc.).
 
 The kernel part of RaceHound provide info about which software breakpoints
-have been hit via /sys/kernel/debug/racehound/events file. Poll/select can
-be used for that file to wait till the events are available there. The
-events can then be read, one per line. The format is the same as used for
+have been hit and races found via /sys/kernel/debug/racehound/events file.
+Poll/select can be used for that file to wait till the events are available
+there. The events can then be read, one per line.
+
+The format for the "BP hit" events is the same as used for
 racehound/breakpoints file, see above.
+
+For the found races, the corresponding event lines are prefixed with
+"[race]".
 
 A user-space application may use that info to automatically start and stop
 monitoring the instructions from the list according to some policy. This

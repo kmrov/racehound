@@ -447,7 +447,7 @@ event_buffer_destroy(struct event_buffer *e)
  *
  * May be called in atomic context too. */
 static void
-add_event(struct event_buffer *e, const char *str_swbp)
+report_swbp_hit_event(struct event_buffer *e, const char *str_swbp)
 {
 	unsigned long flags;
 	unsigned int head;
@@ -468,7 +468,7 @@ add_event(struct event_buffer *e, const char *str_swbp)
 
 	str = kstrdup(str_swbp, GFP_ATOMIC);
 	if (!str) {
-		pr_debug("[rh] add_event: out of memory.\n");
+		pr_debug("[rh] report_swbp_hit_event: out of memory.\n");
 		atomic_inc(&events_lost);
 		goto out;
 	}
@@ -483,6 +483,99 @@ add_event(struct event_buffer *e, const char *str_swbp)
 
 out:
 	spin_unlock_irqrestore(&event_producer_lock, flags);
+}
+
+/* Similar to report_swbp_hit_event() but for a found race.
+ * This function also outputs a message about the race to the system log.
+ *
+ * addr - address of the memory area the threads race for;
+ * str_swbp - string representation of a SW BP that was hit;
+ * task_comm - task->comm for the task that triggered the SW BP;
+ * curr_ip - IP of the instruction after the one that performed the
+ * conflicting access;
+ * curr_comm - task->comm for the task where the instruction with 'curr_ip'
+ *   was executed;
+ * repeated_read - true if the race was found only by repeated read
+ *   technique, false if the hardware breakpoints caught it.
+ * If 'repeated_read' is true, 'curr_ip' and 'curr_comm' have no meaning
+ * (it is unknown which part of the code changed the contents of the memory
+ * area) and are ignored. */
+static void
+report_race_event(struct event_buffer *e, void *addr,
+		  const char *str_swbp, const char *task_comm,
+		  unsigned long curr_ip, const char *curr_comm,
+		  bool repeated_read)
+{
+	/* It is OK to use %pS here even if the race between shifting the
+	 * symbol tables for a module after init and kallsyms still exists
+	 * in the kernel. %pS is used here for an address in the code that
+	 * was running and hit the HW BP. It will not resume until the HW
+	 * BP has been handled. So, if this code is from an init area of
+	 * a kernel module, that init area and its string table cannot go
+	 * away here. */
+	static const char *fmt =
+"[race] Detected a data race on the memory block at %p "
+"between the instruction at %s (comm: \"%s\") "
+"and the instruction right before %pS (comm: \"%s\").";
+
+	static const char *fmt_rread =
+"[race] Detected a data race on the memory block at %p "
+"that is about to be accessed by the instruction at %s (comm: \"%s\"): "
+"the memory block was modified during the delay.";
+
+	unsigned long flags;
+	unsigned int head;
+	unsigned int tail;
+	char *str;
+	int len;
+
+	BUG_ON(str_swbp == NULL);
+
+	if (repeated_read) {
+		len = snprintf(NULL, 0, fmt_rread, addr,
+			       str_swbp, task_comm) + 1;
+		str = kzalloc(len, GFP_ATOMIC);
+		if (!str)
+			goto nomem;
+		snprintf(str, len, fmt_rread, addr, str_swbp, task_comm);
+	}
+	else {
+		len = snprintf(NULL, 0, fmt, addr, str_swbp, task_comm,
+			       (void *)curr_ip, curr_comm) + 1;
+		str = kzalloc(len, GFP_ATOMIC);
+		if (!str)
+			goto nomem;
+		snprintf(str, len, fmt, addr, str_swbp, task_comm,
+			 (void *)curr_ip, curr_comm);
+	}
+	pr_info("[rh] %s\n", str);
+
+	spin_lock_irqsave(&event_producer_lock, flags);
+	head = e->head; /* The producer controls 'head' index. */
+	tail = ACCESS_ONCE(e->tail);
+
+	if (CIRC_SPACE(head, tail, RH_MAX_EVENTS_STORED) < 1) {
+		/* no space left, discard the event */
+		atomic_inc(&events_lost);
+		kfree(str);
+		goto out;
+	}
+
+	e->buf[head] = str;
+	smp_store_release(&e->head, (head + 1) & (RH_MAX_EVENTS_STORED - 1));
+
+	/* Documentation/circular-buffers.txt:
+	 * wake_up() will make sure that the head is committed before
+	 * waking anyone up. */
+	wake_up(&eventq);
+
+out:
+	spin_unlock_irqrestore(&event_producer_lock, flags);
+	return;
+nomem:
+	pr_debug("[rh] report_race_event: out of memory.\n");
+	atomic_inc(&events_lost);
+	return;
 }
 
 /* The event currently being read. The terminating 0 is replaced with '\n'.
@@ -1117,19 +1210,10 @@ hwbp_handler(struct perf_event *event, struct perf_sample_data *data,
 	strncpy(task_comm, swbp_hit->task->comm, TASK_COMM_LEN - 1);
 	task_comm[TASK_COMM_LEN - 1] = 0;
 
-	/* It is OK to use %pS here even if the race between shifting the
-	 * symbol tables for a module after init and kallsyms still exists
-	 * in the kernel. %pS is used here for an address in the code that
-	 * was running and hit the HW BP. It will not resume until the HW
-	 * BP has been handled. So, if this code is from an init area of
-	 * a kernel module, that init area and its string table cannot go
-	 * away here. */
-	pr_info("[rh] Detected a data race on the memory block at %p "
-		"between the instruction at %s (comm: \"%s\") "
-		"and the instruction right before %pS (comm: \"%s\").\n",
-		(void *)(unsigned long)event->attr.bp_addr,
-		swbp_to_string(swbp_hit->swbp), task_comm,
-		(void *)regs->ip, curr_comm);
+	report_race_event(&events,
+			  (void *)(unsigned long)event->attr.bp_addr,
+			  swbp_to_string(swbp_hit->swbp), task_comm,
+			  regs->ip, curr_comm, false);
 
 	breakinfo[i].race_found = 1;
 	atomic_inc(&race_counter);
@@ -1923,19 +2007,14 @@ rh_do_before_insn(void)
 		strncpy(comm, swbp_hit->task->comm, TASK_COMM_LEN - 1);
 		comm[TASK_COMM_LEN - 1] = 0;
 
-		pr_info(
-"[rh] Detected a data race on the memory block at %p "
-"that is about to be accessed by the instruction at %s (comm: \"%s\"): "
-"the memory block was modified during the delay.\n",
-			mi.addr, swbp_to_string(swbp_hit->swbp), comm);
-		/* The task that hit the SW BP cannot disappear while that
-		 * SW BP is being handled. So, it seems, we can access
-		 * task->comm for that task here without additional locks.*/
+		report_race_event(&events, mi.addr,
+				  swbp_to_string(swbp_hit->swbp), comm,
+				  0, NULL, true);
 		atomic_inc(&race_counter);
 	}
 
 	/* Let the user space know the SW BP was hit and processed. */
-	add_event(&events, swbp_to_string(swbp_hit->swbp));
+	report_swbp_hit_event(&events, swbp_to_string(swbp_hit->swbp));
 out:
 	/* Let the copied insn in the Kprobe's slot execute now. */
 	return (unsigned long)swbp_hit->swbp->kp.ainsn.insn;

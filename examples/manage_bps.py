@@ -19,11 +19,11 @@
 #     file lists the currently set breakpoints.
 #
 #   * racehound/events - poll this file to be notified when the breakpoints
-#     hit, then read from it to find which ones have been hit. Reading from
-#     this file removes the events from the memory buffer associated with
-#     this file. If the breakpoints hit very often and the reader does not
-#     keep up, the buffer may become full and the new events will be
-#     discarded.
+#     hit or races are found, then read from it to find which events have
+#     happened. Reading from this file removes the events from the memory
+#     buffer associated with this file. If the breakpoints hit very often
+#     and the reader does not keep up, the buffer may become full and the
+#     new events will be discarded.
 #
 # That is it.
 #
@@ -33,8 +33,7 @@
 #   manage_bp_hits.py [--max-hits=N]
 #
 # This script waits on /sys/kernel/debug/racehound/events file and outputs
-# information about the hit breakpoints placed by RaceHound as soon as it is
-# available in that file.
+# information about the events as soon as it is available in that file.
 #
 # Additionally, if '--max-hits=N' is specified, the breakpoints that hit N
 # times or more will be removed.
@@ -98,8 +97,12 @@ if __name__ == '__main__':
                 events = sel.select()
                 for key, mask in events:
                     for line in f:
+                        if line.startswith('[race]'):
+                            print(line.rstrip())
+                            continue
+
                         bp = line.rstrip()
-                        print("BP hit:", bp)
+                        print('BP hit:', bp)
 
                         # Count the number of hits.
                         # If --max-hits=N is specified and the BP was hit
