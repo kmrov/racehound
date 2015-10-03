@@ -268,8 +268,8 @@ monitoring the instructions from the list according to some policy. This
 should allow to keep overhead at the acceptable level.
 
 Such applications are not provided here yet but can be created using
-examples/manage_bps.py for guidelines:
-https://github.com/winnukem/racehound/blob/master/examples/manage_bps.py.
+examples/events.py for guidelines:
+https://github.com/winnukem/racehound/blob/master/examples/events.py.
 That Python script demonstrates the usage of all the necessary API.
 
 Note that "ma_lines" plugin for GCC 4.9+ can be used to get the list of the

@@ -30,7 +30,7 @@
 # Note that Python 3.4 or newer is needed here.
 #
 # Usage (run the script as root):
-#   manage_bp_hits.py [--max-hits=N] [-q]
+#   events.py [--max-hits=N] [-q]
 #
 # This script waits on /sys/kernel/debug/racehound/events file and outputs
 # information about the events as soon as it is available in that file.
