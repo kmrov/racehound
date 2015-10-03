@@ -39,7 +39,7 @@
 # times or more will be removed.
 #
 # If -q (--quiet) is present, the script wiil only output a summary of the
-# found races at the exit. It will not outout the current events when it
+# found races at the exit. It will not output the current events when it
 # reads them.
 #
 # The script assumes debugfs is mounted to /sys/kernel/debug/.
