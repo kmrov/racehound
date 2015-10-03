@@ -30,7 +30,7 @@
 # Note that Python 3.4 or newer is needed here.
 #
 # Usage (run the script as root):
-#   manage_bp_hits.py [--max-hits=N]
+#   manage_bp_hits.py [--max-hits=N] [-q]
 #
 # This script waits on /sys/kernel/debug/racehound/events file and outputs
 # information about the events as soon as it is available in that file.
@@ -38,12 +38,17 @@
 # Additionally, if '--max-hits=N' is specified, the breakpoints that hit N
 # times or more will be removed.
 #
+# If -q (--quiet) is present, the script wiil only output a summary of the
+# found races at the exit. It will not outout the current events when it
+# reads them.
+#
 # The script assumes debugfs is mounted to /sys/kernel/debug/.
 
 import sys
 import os.path
 import selectors
 import argparse
+import re
 
 
 BPS_FILE = '/sys/kernel/debug/racehound/breakpoints'
@@ -53,6 +58,17 @@ ERR_NO_FILES = ''.join([
     'Please check that debugfs is mounted to /sys/kernel/debug ',
     'and kernel module \"racehound\" is loaded.'])
 
+RE_RACE = re.compile(' '.join([
+    r'Detected a data race on the memory block at (0x)?[0-9a-f]+',
+    r'between the instruction at ([^ \t]+) \(comm: \"(.+)\"\)',
+    r'and the instruction right before (.*) \(comm: \"(.+)\"\)']))
+
+RE_RREAD = re.compile(' '.join([
+    r'Detected a data race on the memory block at (0x)?[0-9a-f]+',
+    r'that is about to be accessed by the instruction at ([^ \t]+)',
+    r'\(comm: \"(.+)\"\):',
+    r'the memory block was modified during the delay']))
+
 
 def positive_int(string):
     value = int(string)
@@ -60,6 +76,81 @@ def positive_int(string):
         msg = "%r is not a positive integer" % string
         raise argparse.ArgumentTypeError(msg)
     return value
+
+
+class RaceGroup(object):
+    '''A group of races between a given pair of instructions
+
+    'insn' - address of the instruction that under watch,
+    'insn_comm' - 'comm' of the process that executed 'insn',
+    'conflict_insn' - the address right after the instruction that performed
+        a conflicting memory access (None if unknown),
+    'conflict_comm' - 'comm' of the process that executed 'conflict_insn'
+        (None if unknown).
+    '''
+    def __init__(self, insn, insn_comm, conflict_insn=None,
+                 conflict_comm=None):
+        self.insn = insn
+        self.insn_comms = [insn_comm]
+        self.conflict_insn = conflict_insn
+        if conflict_comm:
+            self.conflict_comms = [conflict_comm]
+        else:
+            self.conflict_comms = []
+
+        # How many times this race was reported.
+        self.count = 1
+
+    def print_races(self):
+        if self.conflict_insn:
+            print('Race between %s and the insn right before %s.' %
+                  (self.insn, self.conflict_insn))
+            comms = list(set(self.insn_comms))
+            print('The first insn was executed by:', ', '.join(comms))
+            comms = list(set(self.conflict_comms))
+            print('The second insn was executed by:', ', '.join(comms))
+        else:
+            print('Race between %s and some other code.' % self.insn)
+            comms = list(set(self.insn_comms))
+            print('The insn was executed by:', ', '.join(comms))
+
+        print('The race was reported %d time(s).' % self.count)
+
+
+def store_race_info(races, str_race):
+    matched = re.search(RE_RACE, str_race)
+    if matched:
+        _, insn, insn_comm, conflict_insn, conflict_comm = matched.groups()
+        key = insn + '#' + conflict_insn
+    else:
+        matched = re.search(RE_RREAD, str_race)
+        if not matched:
+            sys.stderr.write(
+                'Unknown format of a race report: "%s".\n' % str_race)
+            return
+
+        _, insn, insn_comm = matched.groups()
+        conflict_insn = None
+        conflict_comm = None
+        key = insn
+
+    if key in races:
+        races[key].count = races[key].count + 1
+        races[key].insn_comms.append(insn_comm)
+        if conflict_comm:
+            races[key].conflict_comms.append(conflict_comm)
+    else:
+        races[key] = RaceGroup(
+            insn, insn_comm, conflict_insn, conflict_comm)
+
+
+def print_summary(races):
+    if not races:
+        print('No races found.')
+    else:
+        for _, grp in races.items():
+            grp.print_races()
+            print('')
 
 
 def remove_bp(bp):
@@ -75,7 +166,13 @@ if __name__ == '__main__':
     parser.add_argument(
         '--max-hits', metavar='N', nargs='?', type=positive_int, default=0,
         help='disable the breakpoint if it hits N times or more')
+    parser.add_argument(
+        '-q', '--quiet', action='store_true',
+        help='do not output the events, just print a summary at exit')
     args = parser.parse_args()
+
+    # Mapping: {racing_insns => race_info}
+    races = {}
 
     for fl in [BPS_FILE, EVENTS_FILE]:
         if not os.path.exists(fl):
@@ -98,11 +195,15 @@ if __name__ == '__main__':
                 for key, mask in events:
                     for line in f:
                         if line.startswith('[race]'):
-                            print(line.rstrip())
+                            line = line.rstrip()
+                            store_race_info(races, line)
+                            if not args.quiet:
+                                print(line)
                             continue
 
                         bp = line.rstrip()
-                        print('BP hit:', bp)
+                        if not args.quiet:
+                            print('BP hit:', bp)
 
                         # Count the number of hits.
                         # If --max-hits=N is specified and the BP was hit
@@ -115,9 +216,11 @@ if __name__ == '__main__':
                             bp_hits[bp] = bp_hits[bp] + 1
 
                         if bp_hits[bp] == args.max_hits:
-                            print(
-                                'BP %s was hit %d time(s), removing it' %
-                                (bp, args.max_hits))
+                            if not args.quiet:
+                                print(
+                                    'BP %s was hit %d time(s), removing it' %
+                                    (bp, args.max_hits))
                             remove_bp(bp)
         except KeyboardInterrupt:
+            print_summary(races)
             sys.exit(1)
