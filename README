@@ -252,10 +252,16 @@ given portion of the code, say, part of a module or of the kernel. The list
 may be quite long and monitoring all these instructions at the same time can
 be a bad idea (performance overhead, etc.).
 
-The kernel part of RaceHound provide info about which software breakpoints
-have been hit and races found via /sys/kernel/debug/racehound/events file.
-Poll/select can be used for that file to wait till the events are available
-there. The events can then be read, one per line.
+Note that "ma_lines" plugin for GCC 4.9+ can be used to get the list of the
+locations in the source code where memory accesses may happen (except the
+code written in assembly). lines2insns will translate it to the list of
+locations in the binary code. See ma_lines/Readme.txt.
+
+The kernel part of RaceHound provides info about which software breakpoints
+have been hit and which races have been found. It is available via
+/sys/kernel/debug/racehound/events file. Poll/select can be used for that
+file to wait till the events are available there. The events can then be
+read, one per line.
 
 The format for the "BP hit" events is the same as used for
 racehound/breakpoints file, see above.
@@ -263,16 +269,15 @@ racehound/breakpoints file, see above.
 For the found races, the corresponding event lines are prefixed with
 "[race]".
 
-A user-space application may use that info to automatically start and stop
-monitoring the instructions from the list according to some policy. This
-should allow to keep overhead at the acceptable level.
+An example that demonstrates the usage of this API is also provided:
+https://github.com/winnukem/racehound/blob/master/examples/events.py
 
-Such applications are not provided here yet but can be created using
-examples/events.py for guidelines:
-https://github.com/winnukem/racehound/blob/master/examples/events.py.
-That Python script demonstrates the usage of all the necessary API.
+A user-space application may use the information about the events to
+automatically start and stop monitoring the instructions from the list
+according to some policy. This should allow to keep overhead at the
+acceptable level.
 
-Note that "ma_lines" plugin for GCC 4.9+ can be used to get the list of the
-locations in the source code where memory accesses may happen (except the
-code written in assembly). lines2insns will translate it to the list of
-locations in the binary code. See ma_lines/Readme.txt.
+An example of such application is provided here:
+https://github.com/winnukem/racehound/blob/master/examples/check_races.py
+
+Note that both events.py and check_races.py need Python 3.4 or newer.
