@@ -61,6 +61,7 @@
 #include <linux/spinlock.h>
 #include <linux/mutex.h>
 #include <linux/wait.h>
+#include <linux/completion.h>
 #include <linux/preempt.h>
 
 #include <linux/timer.h>
@@ -256,6 +257,9 @@ struct swbp
 
 	/* A string represenation of this BP - for error reporting, etc. */
 	char *str_repr;
+
+	/* Allows to wait till the processing of this SW BP is complete. */
+	struct completion *completion;
 };
 
 /* The data needed to handle our SW BP when it is hit. */
@@ -378,6 +382,15 @@ destroy_swbp(struct kref *kref)
 {
 	struct swbp *swbp = container_of(kref, typeof(*swbp), kref);
 	disarm_swbp(swbp);
+
+	/* This allows to wait till the processing of this SW BP is
+	 * complete.
+	 * Note that swbp->completion may be NULL in some cases: when
+	 * RaceHound is about to unload or if destroy_swbp() is called when
+	 * cleaning up after some errors, so we take care of that. */
+	if (swbp->completion)
+		complete(swbp->completion);
+
 	kfree(swbp->str_repr);
 	kfree(swbp);
 }
@@ -2422,7 +2435,32 @@ bp_file_write(struct file *filp, const char __user *buf,
 			goto out_unlock;
 		}
 		else {
+			DECLARE_COMPLETION_ONSTACK(compl);
+			swbp->completion = &compl;
+
 			remove_swbp(swbp);
+			mutex_unlock(&swbp_mutex);
+
+			/* It is possible that the SW BP has been hit and
+			 * rh_do_after_insn() has already scheduled a work
+			 * for it. In this case, the SW BP is not fully
+			 * disarmed yet at this point. swbp->kp is disabled
+			 * but remains registered. Let us wait till the
+			 * processing of the SW BP is complete.
+			 * Otherwise, if someone tries to re-add the SW BP
+			 * quickly, a new kprobe will be registered for the
+			 * same location as the old one. Nothing should
+			 * crash, it seems, but, to be sure, let us make
+			 * removing the SW BP more reliable.
+			 *
+			 * Note that we cannot wait for this completion with
+			 * swbp_mutex() locked. This is because complete()
+			 * is called for it from destroy_swbp(), which is
+			 * executed under that lock, so it would be a
+			 * deadlock. */
+			wait_for_completion(&compl);
+
+			mutex_lock(&swbp_mutex);
 			goto out_ok;
 		}
 	}
