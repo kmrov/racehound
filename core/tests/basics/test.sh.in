@@ -2,15 +2,15 @@
 
 ########################################################################
 # This test checks if RaceHound finds simple races in a a kernel module.
-# 
+#
 # Usage:
 #   sh test.sh [--all] [--atomic]
 #
-# Without "--all", the SW BPs are set only for the instruction reading 
-# the variable in hello_plus() function of the target. With "--all" - for 
+# Without "--all", the SW BPs are set only for the instruction reading
+# the variable in hello_plus() function of the target. With "--all" - for
 # both the reading and the writing of the variable.
-# 
-# If "--atomic" is specified, the operations on that variable are 
+#
+# If "--atomic" is specified, the operations on that variable are
 # performed in atomic context in hello_plus() (namely, under spinlock).
 ########################################################################
 
@@ -31,7 +31,7 @@ checkPrereqs()
 		printf "The target module is missing: ${TARGET_MODULE}\n"
 		exit 1
 	fi
-	
+
 	if test ! -f "${BPS_FILE}"; then
 		printf "The list of breakpoints is missing: ${BPS_FILE}\n"
 	fi
@@ -128,9 +128,9 @@ doTest()
 	fi
 
 	loadTarget
-	
+
 	bp_list_file="${DEBUGFS_DIR}/racehound/breakpoints"
-	
+
 	success=0
 	for bp in $(cat "${BPS_FILE}"); do
 		printf "Trying to set BP ${bp}...\n"
@@ -138,14 +138,14 @@ doTest()
 		if test $? -eq 0; then
 			printf "Successfully set BP \"${bp}\".\n"
 			success=1
-		else 
+		else
 			printf "Failed to set BP \"${bp}\", continuing...\n"
 		fi
 	done
-	
+
 	printf "Here is the list of BPs that were set:\n"
 	cat "${bp_list_file}"
-	
+
 	if test ${success} -eq 0; then
 		printf "Error: no BPs were set.\n"
 		cleanupAll
@@ -154,8 +154,8 @@ doTest()
 
 	printf "The first test run.\n"
 	doTestImpl
-	checkFoundRaces	
-	
+	checkFoundRaces
+
 	printf "Clearing the race counter.\n"
 	echo 0 > "${DEBUGFS_DIR}/racehound/race_count"
 	race_count=$(cat "${DEBUGFS_DIR}/racehound/race_count")
@@ -164,12 +164,46 @@ doTest()
 		cleanupAll
 		exit 1
 	fi
-	
+
+	# Clear the list of the BPs to check if it works and then re-add them.
+	echo "clear" > "${bp_list_file}"
+	success=1
+	for bp in $(cat "${bp_list_file}"); do
+		success=0
+	done
+
+	if test ${success} -ne 1; then
+		printf "Failed to clear the list of BPs. Here is what remains set:\n"
+		cat "${bp_list_file}"
+		cleanupAll
+		exit 1
+	fi
+
+	printf "Successfully cleared the list of BPs.\n"
+
+	success=0
+	for bp in $(cat "${BPS_FILE}"); do
+		printf "Trying to set BP ${bp}...\n"
+		echo "${bp}" > "${bp_list_file}"
+		if test $? -eq 0; then
+			printf "Successfully set BP \"${bp}\".\n"
+			success=1
+		else
+			printf "Failed to set BP \"${bp}\", continuing...\n"
+		fi
+	done
+
+	if test ${success} -eq 0; then
+		printf "Error: no BPs were set after \"clear\".\n"
+		cleanupAll
+		exit 1
+	fi
+
 	# Run the test again to check if the counter still works.
 	printf "The second test run.\n"
 	doTestImpl
 	checkFoundRaces
-	
+
 	printf "Clearing the race counter again.\n"
 	echo 0 > "${DEBUGFS_DIR}/racehound/race_count"
 	race_count=$(cat "${DEBUGFS_DIR}/racehound/race_count")
@@ -178,29 +212,29 @@ doTest()
 		cleanupAll
 		exit 1
 	fi
-	
-	# Now remove all the BPs, run the test again and check that 
+
+	# Now remove all the BPs, run the test again and check that
 	# no races are found this time.
 	for bp in $(cat "${BPS_FILE}"); do
 		printf "Trying to remove BP ${bp}...\n"
 		echo "-${bp}" > "${bp_list_file}"
 		if test $? -eq 0; then
 			printf "Successfully removed BP \"${bp}\".\n"
-		else 
+		else
 			printf "Failed to removed BP \"${bp}\", continuing...\n"
 		fi
 	done
-	
+
 	success=1
 	for bp in $(cat "${bp_list_file}"); do
 		success=0
 	done
-	
+
 	if test ${success} -ne 1; then
 		printf "Failed to remove BPs. Here is what remains set:\n"
 		cat "${bp_list_file}"
 	fi
-	
+
 	printf "The third test run. No races should be found this time.\n"
 	doTestImpl
 	race_count=$(cat "${DEBUGFS_DIR}/racehound/race_count")
@@ -209,9 +243,9 @@ doTest()
 		cleanupAll
 		exit 1
 	fi
-	
+
 	unloadTarget
-	
+
 	if ! rmmod "${CORE_MODULE_NAME}"; then
 		printf "Failed to remove \"${CORE_MODULE_NAME}\" module.\n"
 		cleanupAll

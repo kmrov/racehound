@@ -2348,6 +2348,27 @@ process_module_address(struct swbp_group *grp, int is_init,
 	return 0;
 }
 
+static void
+clear_all_bps(void)
+{
+	struct swbp_group *grp;
+	struct swbp_group *tmp;
+
+	mutex_lock(&swbp_mutex);
+	list_for_each_entry_safe(grp, tmp, &swbp_group_list, list)
+		clear_swbp_group(grp);
+	mutex_unlock(&swbp_mutex);
+
+	/* Make sure the workqueue items placed there earler, run to their
+	 * completion. Note that some new items might have been placed there
+	 * if new SWBPs are being added and hit after "clear" command.
+	 * It should be OK. */
+	flush_workqueue(wq);
+
+	/* At this point, only the SWBPs added after "clear" may be in
+	 * processing. */
+}
+
 /* Limit on the length of the BP string the user may pass to RaceHound.
  * Nice to have, because the user might try to pass something big.
  *
@@ -2391,6 +2412,15 @@ bp_file_write(struct file *filp, const char __user *buf,
 	str[count] = '\0';
 	if (str[count - 1] == '\n')
 		str[count - 1] = '\0';
+
+	if (strcmp(str, "clear") == 0) {
+		clear_all_bps();
+
+		*f_pos += count;
+		ret = count;
+		kfree(orig_str);
+		return ret;
+	}
 
 	if (str[0] == '-')
 	{
