@@ -99,7 +99,7 @@ If <module_name> is not specified, the kernel or a built-in module is
 assumed.
 
 "init" and "core" are the areas containing the code of the kernel or a
-module in memory. See module_init and module_core in struct module. Dealing
+module in memory. See core_layout/module_core, etc., in struct module. Dealing
 with the ELF sections in the kernel has its difficulties, same for the
 addresses and sizes of the functions, so RaceHound uses "init" and "core"
 areas instead.

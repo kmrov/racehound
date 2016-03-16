@@ -51,6 +51,7 @@
 /* ====================================================================== */
 
 #include <linux/kernel.h>
+#include <linux/version.h>
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
@@ -105,6 +106,48 @@
 # define RH_INSN_SLOT_SIZE KPROBE_INSN_SLOT_SIZE
 #else
 # define RH_INSN_SLOT_SIZE MAX_INSN_SIZE
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0)
+static inline void *module_core_addr(struct module *mod)
+{
+	return mod->core_layout.base;
+}
+
+static inline unsigned int core_text_size(struct module *mod)
+{
+	return mod->core_layout.size;
+}
+
+static inline void *module_init_addr(struct module *mod)
+{
+	return mod->init_layout.base;
+}
+
+static inline unsigned int init_text_size(struct module *mod)
+{
+	return mod->init_layout.size;
+}
+#else
+static inline void *module_core_addr(struct module *mod)
+{
+	return mod->module_core;
+}
+
+static inline unsigned int core_text_size(struct module *mod)
+{
+	return mod->core_text_size;
+}
+
+static inline void *module_init_addr(struct module *mod)
+{
+	return mod->module_init;
+}
+
+static inline unsigned int init_text_size(struct module *mod)
+{
+	return mod->init_text_size;
+}
 #endif
 /* ====================================================================== */
 
@@ -870,9 +913,9 @@ arm_swbp(struct swbp *swbp)
 			(void *)(stext + (unsigned long)swbp->offset);
 	}
 	else if (swbp->is_init) { /* a module, init area */
-		if (mod->module_init) {
+		if (module_init_addr(mod)) {
 			swbp->kp.addr =
-				(void *)((unsigned long)mod->module_init +
+				(void *)((unsigned long)module_init_addr(mod) +
 				(unsigned long)swbp->offset);
 		}
 		else {
@@ -883,9 +926,9 @@ arm_swbp(struct swbp *swbp)
 		}
 	}
 	else { /* a module, core area */
-		if (mod->module_core) {
+		if (module_core_addr(mod)) {
 			swbp->kp.addr =
-				(void *)((unsigned long)mod->module_core +
+				(void *)((unsigned long)module_core_addr(mod) +
 				(unsigned long)swbp->offset);
 		}
 		else {
@@ -1677,42 +1720,42 @@ validate_insn_in_module(int is_init, unsigned int offset,
 	unsigned long addr = offset;
 
 	if (is_init) {
-		if (mod->module_init == NULL) {
+		if (!module_init_addr(mod)) {
 			pr_warning(
 "[rh] The insn is in the init area but \"%s\" module has no init area.\n",
 				module_name(mod));
 			return -EINVAL;
 		}
 
-		if (offset >= mod->init_text_size) {
+		if (offset >= init_text_size(mod)) {
 			pr_warning("[rh] "
 	"The insn at offset 0x%x is not in the init area of \"%s\".\n",
 			offset, module_name(mod));
 			return -ERANGE;
 		}
-		addr += (unsigned long)mod->module_init;
+		addr += (unsigned long)module_init_addr(mod);
 	}
 	else {
-		if (mod->module_core == NULL) {
+		if (!module_core_addr(mod)) {
 			pr_warning(
 "[rh] The insn is in the core area but \"%s\" module has no core area.\n",
 				module_name(mod));
 			return -EINVAL;
 		}
 
-		if (offset >= mod->core_text_size) {
+		if (offset >= core_text_size(mod)) {
 			pr_warning("[rh] "
 	"The insn at offset 0x%x is not in the core area of \"%s\".\n",
 			offset, module_name(mod));
 			return -ERANGE;
 		}
-		addr += (unsigned long)mod->module_core;
+		addr += (unsigned long)module_core_addr(mod);
 	}
 	return 0;
 }
 
 /* [NB] The init area of the module cannot go away while this function runs.
- * It is not needed then to take module_mutex to check mod->module_init and
+ * It is not needed then to take module_mutex to check the init area and
  * process the BPs there.
  *
  * Call this function with swbp_mutex locked. */
