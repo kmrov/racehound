@@ -116,7 +116,7 @@ static inline void *module_core_addr(struct module *mod)
 
 static inline unsigned int core_text_size(struct module *mod)
 {
-	return mod->core_layout.size;
+	return mod->core_layout.text_size;
 }
 
 static inline void *module_init_addr(struct module *mod)
@@ -126,7 +126,7 @@ static inline void *module_init_addr(struct module *mod)
 
 static inline unsigned int init_text_size(struct module *mod)
 {
-	return mod->init_layout.size;
+	return mod->init_layout.text_size;
 }
 #else
 static inline void *module_core_addr(struct module *mod)
