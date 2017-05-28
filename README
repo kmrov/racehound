@@ -56,7 +56,8 @@ preferable).
 * (only if you want to build "ma_lines" plugin) GCC development files needed
 to build plugins.
 
-* elfutils, libelf, libdw and their development files.
+* elfutils, libelf, libdw and their development files (for example, install
+elfutils-devel and elfutils-libelf-devel if you use Fedora, RHEL or the like).
 
 # Build
 --------------
