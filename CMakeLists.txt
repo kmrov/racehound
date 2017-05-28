@@ -139,8 +139,8 @@ set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -Wall")
 #######################################################################
 # Perform basic checks
 
-# Check if we use kernel version 3.14 or newer
-check_kernel_version(3 14 0)
+# Check if we use kernel version 3.10 or newer
+check_kernel_version(3 10 0)
 
 # Check if kernel modules can be built on this system
 check_module_build()
