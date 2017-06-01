@@ -1,10 +1,28 @@
-if (RH_64_BIT)
-	set(BPS_SINGLE_FILE "${CMAKE_CURRENT_SOURCE_DIR}/breakpoints-single-x64.list")
-	set(BPS_ALL_FILE "${CMAKE_CURRENT_SOURCE_DIR}/breakpoints-all-x64.list")
-else ()
-	set(BPS_SINGLE_FILE "${CMAKE_CURRENT_SOURCE_DIR}/breakpoints-single-x32.list")
-	set(BPS_ALL_FILE "${CMAKE_CURRENT_SOURCE_DIR}/breakpoints-all-x32.list")
-endif ()
+# Prepare the lists of breakpoints for testing
+set(BP_FILE_SIMPLE "${CMAKE_BINARY_DIR}/core/tests/simple/test_simple-bps.list")
+set(BP_FILE_COMMON "${CMAKE_BINARY_DIR}/core/tests/common_target/test_common_target-bps.list")
+
+add_custom_command(
+	OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/breakpoints-all.list"
+	COMMAND cat "${BP_FILE_SIMPLE}" "${BP_FILE_COMMON}" > "${CMAKE_CURRENT_BINARY_DIR}/breakpoints-all.list"
+	DEPENDS
+		"${BP_FILE_SIMPLE}"
+		"${BP_FILE_COMMON}"
+)
+add_custom_command(
+	OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/breakpoints-single.list"
+	COMMAND cp -f "${BP_FILE_SIMPLE}" "${CMAKE_CURRENT_BINARY_DIR}/breakpoints-single.list"
+	DEPENDS "${BP_FILE_SIMPLE}"
+)
+add_custom_target(basics-bp-lists
+	DEPENDS
+		"${CMAKE_CURRENT_BINARY_DIR}/breakpoints-all.list"
+		"${CMAKE_CURRENT_BINARY_DIR}/breakpoints-single.list"
+)
+# just in case
+add_dependencies(basics-bp-lists "test_simple-bps" "test_common_target-bps")
+
+rh_test_add_target("basics-bp-lists")
 
 # Configure the test scripts
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/test.sh.in"
@@ -22,7 +40,7 @@ configure_file("${CMAKE_CURRENT_SOURCE_DIR}/test_modules.sh.in"
 # A single breakpoint in hello_plus(), the insn reads from memory.
 rh_test_add_script("racehound.basics.01" "test.sh")
 
-# 2 breakpoint in hello_plus(), read and then write.
+# 2 breakpoints in hello_plus(), read and then write.
 rh_test_add_script("racehound.basics.02" "test.sh" "--all")
 
 # Same as "racehound.basics.02" but the read and write are executed in

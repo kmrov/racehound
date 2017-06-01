@@ -175,8 +175,8 @@ TARGET_MODULE="@CMAKE_BINARY_DIR@/core/tests/simple/${TARGET_NAME}.ko"
 COMMON_TARGET_NAME="test_common_target"
 COMMON_TARGET_MODULE="@CMAKE_BINARY_DIR@/core/tests/common_target/${COMMON_TARGET_NAME}.ko"
 
-BPS_FILE="@BPS_ALL_FILE@"
-BPS_SINGLE_FILE="@BPS_SINGLE_FILE@"
+BPS_SINGLE_FILE="@CMAKE_CURRENT_BINARY_DIR@/breakpoints-single.list"
+BPS_FILE="@CMAKE_CURRENT_BINARY_DIR@/breakpoints-all.list"
 
 checkPrereqs
 

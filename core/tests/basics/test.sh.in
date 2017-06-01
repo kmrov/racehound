@@ -259,8 +259,8 @@ CORE_MODULE_NAME=racehound
 CORE_MODULE="@CMAKE_BINARY_DIR@/core/${CORE_MODULE_NAME}.ko"
 TARGET_NAME="test_simple"
 TARGET_MODULE="@CMAKE_BINARY_DIR@/core/tests/simple/${TARGET_NAME}.ko"
-BPS_SINGLE_FILE="@BPS_SINGLE_FILE@"
-BPS_ALL_FILE="@BPS_ALL_FILE@"
+BPS_SINGLE_FILE="@CMAKE_CURRENT_BINARY_DIR@/breakpoints-single.list"
+BPS_ALL_FILE="@CMAKE_CURRENT_BINARY_DIR@/breakpoints-all.list"
 
 TEST_ATOMIC_PARAM=""
 if test "t$1" = "t--atomic" || test "t$2" = "t--atomic"; then
