@@ -2,8 +2,8 @@
 --------------
 RaceHound can be used to detect data races in the Linux kernel on x86.
 
-Kernel 3.14 or newer is required. Kprobes, kallsyms and debugfs support are
-also needed in the kernel.
+Kernel 3.10 or newer is required, 4.1 or newer is recommended.
+Kprobes, kallsyms and debugfs support should be enabled in the kernel.
 
 The ideas implemented here are similar to how DataCollider tool operates
 on MS Windows.
@@ -243,7 +243,8 @@ there.
 On x86-64, adding a location to monitor may also fail if the kernel does not
 have the following fix:
 "kprobes/x86: Return correct length in __copy_instruction()"
-(commit c80e5c0c23ce2282476fdc64c4b5e3d3a40723fd in the mainline)
+(commit c80e5c0c23ce2282476fdc64c4b5e3d3a40723fd in the mainline, included
+into kernel 4.1).
 ------------------
 
 ## Scenario 2: sweeping through the code
