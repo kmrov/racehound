@@ -989,24 +989,6 @@ arm_swbp(struct swbp *swbp)
 		goto out_free_insn;
 	}
 
-	/* After a Kprobe has been registered, kp.ainsn.boostable is set to
-	 * 0 (yes, 0!) if "boost" can be used for it, that is, if a jump to
-	 * the next insn can be placed in the insn slot itself. It will be
-	 * set to 1 after the first single-step over the insn if the jump
-	 * has been successfully placed.
-	 *
-	 * We need similar jumps to rh_thunk_post, but they will be added
-	 * manually. So let's require "boostablity" as a sanity check. */
-	if (!rh_special_boostable(swbp->rh_insn) &&
-	    swbp->kp.ainsn.boostable != 0) {
-		pr_warning("[rh] Unable to process the instruction: "
-		"cannot place an additional jump into the insn slot. "
-		"boostable = %d\n",
-			swbp->kp.ainsn.boostable);
-		ret = -EINVAL;
-		goto out_free_insn;
-	}
-
 	/* The insn and the jump near relative following it must fit into
 	 * the slot. */
 	if (len + RH_JMP_REL_SIZE > RH_INSN_SLOT_SIZE) {
@@ -1019,12 +1001,7 @@ arm_swbp(struct swbp *swbp)
 
 	/* Make Kprobes think the insn slot is "dirty" (like it is for the
 	 * insns with "boost" applied) when the user tries to unregister the
-	 * Kprobe.
-	 *
-	 * boostable = 1 also makes the Kprobes think boost has already been
-	 * prepared, so they would not place their own jump there instead.
-	 * May be useful in case of errors in kp_pre(), when we let Kprobes
-	 * do what they do by default. */
+	 * Kprobe. */
 	swbp->kp.ainsn.boostable = 1;
 
 	/* Add the jump to rh_thunk_post(), similar to how
