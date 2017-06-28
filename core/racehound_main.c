@@ -198,12 +198,19 @@ static atomic_t bps_in_use = ATOMIC_INIT(0);
 /* It would be nice to get it some other way rather than look up by name.
  * But that seems impossible unless this code is included into the kernel
  * itself. */
-static int (*do_arch_install_hwbp)(struct perf_event *bp) = NULL;
-static int (*do_arch_uninstall_hwbp)(struct perf_event *bp) = NULL;
+static int (*do_arch_install_hwbp)(struct perf_event *bp);
+static int (*do_arch_uninstall_hwbp)(struct perf_event *bp);
 
 /* current_kprobe is not exported to the modules, so we get it via kallsyms
  * too. */
-static struct kprobe **p_current_kprobe = NULL;
+static struct kprobe **p_current_kprobe;
+
+/* set_memory_{ro,rw} functions are also not exported. */
+static int (*do_set_memory_rw)(unsigned long addr, int numpages);
+static int (*do_set_memory_ro)(unsigned long addr, int numpages);
+
+/* Same for text_mutex. */
+static struct mutex *p_text_mutex;
 /* ====================================================================== */
 
 /* The code of the kernel proper occupies the range [_text, _etext) in the
@@ -874,6 +881,39 @@ kp_post(struct kprobe *p, struct pt_regs *regs, unsigned long flags)
 {
 }
 
+/* Call this under text_mutex or kprobe_mutex to avoid races with making
+ * insn slots writable and ready-only for other kprobes. */
+static int
+write_jump(u8 *where)
+{
+	struct __arch_relative_jmp {
+		u8 opcode;
+		s32 disp;
+	} __packed jmp;
+	int ret;
+
+	jmp.opcode = RH_JMP_REL_OPCODE;
+	jmp.disp = (s32)((long)rh_thunk_post -
+			 ((long)where + RH_JMP_REL_SIZE));
+
+	/* The insn slots may be write-protected since the mainline commit
+	 * d0381c81c2f7 ("kprobes/x86: Set kprobes pages read-only"). */
+	ret = probe_kernel_write(where, &jmp, sizeof(jmp));
+	if (ret >= 0)
+		return 0;
+
+	if (ret != -EFAULT) /* just in case */
+		return ret;
+
+	do_set_memory_rw((unsigned long)where & PAGE_MASK, 1);
+	ret = probe_kernel_write(where, &jmp, sizeof(jmp));
+	do_set_memory_ro((unsigned long)where & PAGE_MASK, 1);
+
+	if (ret < 0)
+		return ret;
+	return 0;
+}
+
 /* Call this function with swbp_mutex locked.
  *
  * [NB] For a BP to be set on the init area of the module, call this
@@ -889,11 +929,6 @@ arm_swbp(struct swbp *swbp)
 	struct module *mod = swbp->grp->mod;
 	int ret = 0;
 	unsigned int len;
-	struct __arch_relative_jmp {
-		u8 opcode;
-		s32 disp;
-	} __packed *jmp;
-	u8 *from;
 
 	if (swbp->armed) {
 		pr_warning(
@@ -1008,11 +1043,19 @@ arm_swbp(struct swbp *swbp)
 	 * synthesize_reljump() from Kprobes do such things.
 	 * [NB] The insn is not a control-transfer insn because
 	 * rh_should_process_insn() returns 0 for these. */
-	from = (u8 *)swbp->kp.ainsn.insn + len;
-	jmp = (struct __arch_relative_jmp *)from;
-	jmp->opcode = RH_JMP_REL_OPCODE;
-	jmp->disp = (s32)((long)rh_thunk_post -
-			  ((long)from + RH_JMP_REL_SIZE));
+	ret = mutex_lock_killable(p_text_mutex);
+	if (ret) {
+		pr_warning("[rh] Failed to lock text_mutex.\n");
+		goto out_free_insn;
+	}
+	ret = write_jump((u8 *)swbp->kp.ainsn.insn + len);
+	mutex_unlock(p_text_mutex);
+
+	if (ret) {
+		pr_warning("[rh] Failed to place jump into the insn slot for %s.\n",
+			swbp_to_string(swbp));
+		goto out_free_insn;
+	}
 
 	ret = enable_kprobe(&swbp->kp);
 	if (ret) {
@@ -2624,6 +2667,27 @@ find_kernel_api(void)
 		"The size of the kernel is too large: %lu byte(s).\n",
 			etext - stext);
 		return -ERANGE;
+	}
+
+	do_set_memory_rw = (void *)kallsyms_lookup_name("set_memory_rw");
+	if (do_set_memory_rw == NULL) {
+		pr_warning(
+		"[rh] Symbol not found: 'set_memory_rw'\n");
+		return -EINVAL;
+	}
+
+	do_set_memory_ro = (void *)kallsyms_lookup_name("set_memory_ro");
+	if (do_set_memory_ro == NULL) {
+		pr_warning(
+		"[rh] Symbol not found: 'set_memory_ro'\n");
+		return -EINVAL;
+	}
+
+	p_text_mutex = (void *)kallsyms_lookup_name("text_mutex");
+	if (p_text_mutex == NULL) {
+		pr_warning(
+		"[rh] Symbol not found: 'text_mutex'\n");
+		return -EINVAL;
 	}
 	return 0;
 }
