@@ -94,6 +94,8 @@
 
 #include <linux/circ_buf.h>
 
+#include <generated/utsrelease.h>
+
 /* Do not #include <common/...> or other headers of the insn decoder here.
  * They may conflict with the ones from the kernel #included via kprobes.h.
  * Use the wrappers from insn_analysis.h instead. */
@@ -108,7 +110,10 @@
 # define RH_INSN_SLOT_SIZE MAX_INSN_SIZE
 #endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0)
+#if (( LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0) ) || \
+	( LINUX_VERSION_CODE >= KERNEL_VERSION(4, 4, 0) && \
+	UTS_UBUNTU_RELEASE_ABI >= 7 ) \
+)
 static inline void *module_core_addr(struct module *mod)
 {
 	return mod->core_layout.base;
