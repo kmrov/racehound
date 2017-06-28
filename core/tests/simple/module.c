@@ -5,7 +5,7 @@
 #include <linux/string.h>
 #include <linux/debugfs.h>
 #include <linux/spinlock.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 static int test_atomic = 0;
 module_param(test_atomic, int, S_IRUGO);
