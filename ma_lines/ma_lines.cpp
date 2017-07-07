@@ -36,6 +36,13 @@
 #define PLUGIN_EXPORT __attribute__ ((visibility("default")))
 /* ====================================================================== */
 
+#if BUILDING_GCC_VERSION >= 6000
+typedef gimple * rh_stmt;
+#else
+typedef gimple rh_stmt;
+#endif
+/* ====================================================================== */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -98,7 +105,7 @@ static std::set<std::string> special_functions(
 /* ====================================================================== */
 
 static void
-output_ma_location(gimple stmt, EAccessType ma_type)
+output_ma_location(rh_stmt stmt, EAccessType ma_type)
 {
 	int ret;
 	
@@ -174,7 +181,7 @@ end:
 static void
 process_function_call(gimple_stmt_iterator *gsi)
 {
-	gimple stmt = gsi_stmt(*gsi);
+	rh_stmt stmt = gsi_stmt(*gsi);
 	tree fndecl = gimple_call_fndecl(stmt);
 	
 	if (!fndecl) { 
@@ -191,7 +198,10 @@ process_function_call(gimple_stmt_iterator *gsi)
 static void
 process_expr(gimple_stmt_iterator gsi, tree expr, bool is_write)
 {
-	gimple stmt = gsi_stmt(gsi);
+#if BUILDING_GCC_VERSION >= 6000
+	int reversep = 0;
+#endif
+	rh_stmt stmt = gsi_stmt(gsi);
 	HOST_WIDE_INT size = int_size_in_bytes(TREE_TYPE (expr));
 	if (size < 1)
 		return;
@@ -205,10 +215,15 @@ process_expr(gimple_stmt_iterator gsi, tree expr, bool is_write)
 	enum machine_mode mode;
 	int volatilep = 0;
 	int unsignedp = 0;
+#if BUILDING_GCC_VERSION >= 6000
+	tree base = get_inner_reference(
+		expr, &bitsize, &bitpos, &offset, &mode, &unsignedp,
+		&reversep, &volatilep, false);
+#else
 	tree base = get_inner_reference(
 		expr, &bitsize, &bitpos, &offset, &mode, &unsignedp, 
 		&volatilep, false);
-
+#endif
 	if (DECL_P(base)) {
 		struct pt_solution pt;
 		memset(&pt, 0, sizeof(pt));
@@ -249,7 +264,7 @@ process_expr(gimple_stmt_iterator gsi, tree expr, bool is_write)
 static void
 process_gimple(gimple_stmt_iterator *gsi)
 {
-	gimple stmt;
+	rh_stmt stmt;
 	stmt = gsi_stmt(*gsi);
 	
 	if (is_gimple_call(stmt)) {
