@@ -10,6 +10,8 @@ kbuild_add_module(${kmodule_name}
 	"racehound_main.c"
 	"insn_analysis.c"
 	"insn_analysis.h"
+	"stackdepot.c"
+	"stackdepot.h"
 	"thunks.S"
 	"${COMMON_SOURCE_DIR}/inat.c"
 	"${COMMON_SOURCE_DIR}/inat.h"

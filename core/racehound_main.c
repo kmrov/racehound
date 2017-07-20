@@ -91,7 +91,7 @@
 #include <linux/kprobes.h>
 #include <linux/perf_event.h>
 #include <linux/hw_breakpoint.h>
-
+#include <linux/stacktrace.h>
 #include <linux/circ_buf.h>
 
 #include <generated/utsrelease.h>
@@ -101,7 +101,52 @@
  * Use the wrappers from insn_analysis.h instead. */
 #include "insn_analysis.h"
 
+#include "stackdepot.h"
+
 #include "config.h"
+/* ====================================================================== */
+
+/* Maximum stack depth for the stored stack traces. */
+#define RH_STACK_DEPTH 64
+
+/* Parameters of the hash table to store the races. */
+#define RH_RACE_HASH_BITS 10
+#define RH_RACE_HASH_SIZE (1UL << RH_RACE_HASH_BITS)
+
+struct rh_race {
+	struct rh_race *next;
+
+	/* Handles to the stored stacks of the conflicting accesses.
+	 * st[0] is always non-zero, st[1] is 0 if the race was found
+	 * by the repeated read rather than by a HWBP hit.
+	 * 'combined' is used for hashing. */
+	union {
+		u64 combined;
+		depot_stack_handle_t st[2];
+	} stacks;
+
+	/* The threads that accessed the given memory area. */
+	char comm0[TASK_COMM_LEN];
+	char comm1[TASK_COMM_LEN];
+
+	/* Address and size of the accessed memory area. */
+	unsigned long addr;
+	unsigned int size;
+
+	/* For the deferred reporting of the race. */
+	struct work_struct work;
+};
+
+/* A mutex to protect the collection of found races. */
+static DEFINE_MUTEX(race_mutex);
+
+static struct rh_race *race_table[RH_RACE_HASH_SIZE];
+
+/*
+ * We cannot place this declaration in stackdepot.h because the version
+ * of that file provided by the kernel is likely to take precedence.
+ */
+void depot_cleanup(void);
 /* ====================================================================== */
 
 #if defined(KPROBE_INSN_SLOT_SIZE)
@@ -451,6 +496,115 @@ destroy_swbp(struct kref *kref)
 }
 /* ====================================================================== */
 
+/* This is similar to how KASAN uses stackdepot in the kernel 4.12. */
+static depot_stack_handle_t save_stack(void)
+{
+	unsigned long entries[RH_STACK_DEPTH];
+	struct stack_trace trace = {
+		.nr_entries = 0,
+		.entries = entries,
+		.max_entries = RH_STACK_DEPTH,
+		.skip = 0
+	};
+
+	save_stack_trace(&trace);
+	if (trace.nr_entries != 0 &&
+	    trace.entries[trace.nr_entries-1] == ULONG_MAX)
+		trace.nr_entries--;
+
+	return depot_save_stack(&trace, GFP_ATOMIC);
+}
+
+/*
+ * If any of the memory accesses are from the init code of a module or if
+ * the module has already been unloaded, the stack traces will be printed
+ * with some addresses unresolved or resolved incorrectly. Should be
+ * acceptable.
+ */
+static void
+report_race(const struct rh_race *race)
+{
+	struct stack_trace trace0 = { .nr_entries = 0 };
+	struct stack_trace trace1 = { .nr_entries = 0 };
+	bool got_both_threads = (!!race->stacks.st[1]);
+	static const char *sep =
+		"=========================================================";
+
+	if (!race->stacks.st[0])
+		return;
+
+	depot_fetch_stack(race->stacks.st[0], &trace0);
+	if (!trace0.nr_entries)
+		return;
+
+	pr_warning("[rh] %s\n", sep);
+	pr_warning("[rh] Detected a data race on the the memory block at %p, size %u:\n",
+		(void *)race->addr, race->size);
+	pr_warning("[rh] ----- Thread #1, comm: %s ----- \n", race->comm0);
+	print_stack_trace(&trace0, 0);
+
+	if (got_both_threads) {
+		depot_fetch_stack(race->stacks.st[1], &trace1);
+		if (!trace1.nr_entries)
+			return;
+
+		pr_warning("[rh] ----- Thread #2, comm: %s ----- \n",
+			   race->comm1);
+		print_stack_trace(&trace1, 0);
+	}
+	else {
+		pr_warning(
+			"[rh] ----- Thread #2 - unknown, "
+			"the contents of the memory block changed during the delay. ----- \n");
+	}
+	pr_warning("[rh] %s\n", sep);
+}
+
+static void
+do_report_race_work(struct work_struct *work)
+{
+	struct rh_race *race = container_of(work, struct rh_race, work);
+	struct rh_race **bucket;
+	struct rh_race *found;
+	int ret;
+
+	bucket = &race_table[hash_64(race->stacks.combined,
+				     RH_RACE_HASH_BITS)];
+
+	/*
+	 * Check if the race is new and if so, store it and report it.
+	 * If the race is known (or if an error occurs), free the structure.
+	 * The stored structures will be freed separately.
+	 */
+	ret = mutex_lock_killable(&race_mutex);
+	if (ret) {
+		pr_debug("[rh] do_report_race_work: failed to lock the mutex.\n");
+		kfree(race);
+		return;
+	}
+
+	for (found = *bucket; found; found = found->next) {
+		if (found->stacks.st[0] == race->stacks.st[0] &&
+		    found->stacks.st[1] == race->stacks.st[1]) {
+			break;
+		}
+	}
+
+	if (!found) {
+		struct rh_race *tmp = *bucket;
+
+		*bucket = race;
+		race->next = tmp;
+
+		report_race(race);
+	}
+	else {
+		kfree(race);
+	}
+	mutex_unlock(&race_mutex);
+}
+/* ====================================================================== */
+
 /* The maximum number of events that can be stored in the circular buffer
  * and shown in "events" file. Must be a power of 2.
  *
@@ -551,99 +705,6 @@ report_swbp_hit_event(struct event_buffer *e, const char *str_swbp)
 
 out:
 	spin_unlock_irqrestore(&event_producer_lock, flags);
-}
-
-/* Similar to report_swbp_hit_event() but for a found race.
- * This function also outputs a message about the race to the system log.
- *
- * addr - address of the memory area the threads race for;
- * str_swbp - string representation of a SW BP that was hit;
- * task_comm - task->comm for the task that triggered the SW BP;
- * curr_ip - IP of the instruction after the one that performed the
- * conflicting access;
- * curr_comm - task->comm for the task where the instruction with 'curr_ip'
- *   was executed;
- * repeated_read - true if the race was found only by repeated read
- *   technique, false if the hardware breakpoints caught it.
- * If 'repeated_read' is true, 'curr_ip' and 'curr_comm' have no meaning
- * (it is unknown which part of the code changed the contents of the memory
- * area) and are ignored. */
-static void
-report_race_event(struct event_buffer *e, void *addr,
-		  const char *str_swbp, const char *task_comm,
-		  unsigned long curr_ip, const char *curr_comm,
-		  bool repeated_read)
-{
-	/* It is OK to use %pS here even if the race between shifting the
-	 * symbol tables for a module after init and kallsyms still exists
-	 * in the kernel. %pS is used here for an address in the code that
-	 * was running and hit the HW BP. It will not resume until the HW
-	 * BP has been handled. So, if this code is from an init area of
-	 * a kernel module, that init area and its string table cannot go
-	 * away here. */
-	static const char *fmt =
-"[race] Detected a data race on the memory block at %p "
-"between the instruction at %s (comm: \"%s\") "
-"and the instruction right before %pS (comm: \"%s\").";
-
-	static const char *fmt_rread =
-"[race] Detected a data race on the memory block at %p "
-"that is about to be accessed by the instruction at %s (comm: \"%s\"): "
-"the memory block was modified during the delay.";
-
-	unsigned long flags;
-	unsigned int head;
-	unsigned int tail;
-	char *str;
-	int len;
-
-	BUG_ON(str_swbp == NULL);
-
-	if (repeated_read) {
-		len = snprintf(NULL, 0, fmt_rread, addr,
-			       str_swbp, task_comm) + 1;
-		str = kzalloc(len, GFP_ATOMIC);
-		if (!str)
-			goto nomem;
-		snprintf(str, len, fmt_rread, addr, str_swbp, task_comm);
-	}
-	else {
-		len = snprintf(NULL, 0, fmt, addr, str_swbp, task_comm,
-			       (void *)curr_ip, curr_comm) + 1;
-		str = kzalloc(len, GFP_ATOMIC);
-		if (!str)
-			goto nomem;
-		snprintf(str, len, fmt, addr, str_swbp, task_comm,
-			 (void *)curr_ip, curr_comm);
-	}
-	pr_info("[rh] %s\n", str);
-
-	spin_lock_irqsave(&event_producer_lock, flags);
-	head = e->head; /* The producer controls 'head' index. */
-	tail = ACCESS_ONCE(e->tail);
-
-	if (CIRC_SPACE(head, tail, RH_MAX_EVENTS_STORED) < 1) {
-		/* no space left, discard the event */
-		atomic_inc(&events_lost);
-		kfree(str);
-		goto out;
-	}
-
-	e->buf[head] = str;
-	smp_store_release(&e->head, (head + 1) & (RH_MAX_EVENTS_STORED - 1));
-
-	/* Documentation/circular-buffers.txt:
-	 * wake_up() will make sure that the head is committed before
-	 * waking anyone up. */
-	wake_up(&eventq);
-
-out:
-	spin_unlock_irqrestore(&event_producer_lock, flags);
-	return;
-nomem:
-	pr_debug("[rh] report_race_event: out of memory.\n");
-	atomic_inc(&events_lost);
-	return;
 }
 
 /* The event currently being read. The terminating 0 is replaced with '\n'.
@@ -1230,6 +1291,11 @@ static struct hwbp {
 	struct timer_list __percpu *timers_set;
 	struct timer_list __percpu *timers_clear;
 
+	/* Info about the thread that hit the HW BP: comm & stack trace.
+	 * Meaningful only if race_found != 0. */
+	char comm[TASK_COMM_LEN];
+	depot_stack_handle_t st;
+
 	/* Nonzero if a race has been found using this HW BP on any CPU,
 	 * 0 otherwise. */
 	int race_found;
@@ -1255,9 +1321,6 @@ hwbp_handler(struct perf_event *event, struct perf_sample_data *data,
 	     struct pt_regs *regs)
 {
 	unsigned long flags;
-	char curr_comm[TASK_COMM_LEN];
-	char task_comm[TASK_COMM_LEN];
-	struct swbp_hit *swbp_hit;
 	int i;
 
 	spin_lock_irqsave(&hwbp_lock, flags);
@@ -1277,25 +1340,13 @@ hwbp_handler(struct perf_event *event, struct perf_sample_data *data,
 	/* May happen if a CPU schedules a timer to clear the HW BP on
 	 * another CPU and the HW BP triggers on the latter before the timer
 	 * function. .swbp_hit is set to NULL under hwbp_lock before
-	 * scheduling the timer. So if .swbp_hit is not NULL here, we can
-	 * safely access its fields. */
+	 * scheduling the timer. */
 	if (breakinfo[i].swbp_hit == NULL)
 		goto out;
 
-	swbp_hit = breakinfo[i].swbp_hit;
-
-	/* Why copy? See the comment for a similar copying in
-	 * rh_do_before_insn() for a reason. */
-	strncpy(curr_comm, current->comm, TASK_COMM_LEN - 1);
-	curr_comm[TASK_COMM_LEN - 1] = 0;
-	strncpy(task_comm, swbp_hit->task->comm, TASK_COMM_LEN - 1);
-	task_comm[TASK_COMM_LEN - 1] = 0;
-
-	report_race_event(&events,
-			  (void *)(unsigned long)event->attr.bp_addr,
-			  swbp_to_string(swbp_hit->swbp), task_comm,
-			  regs->ip, curr_comm, false);
-
+	strncpy(breakinfo[i].comm, current->comm, TASK_COMM_LEN - 1);
+	breakinfo[i].comm[TASK_COMM_LEN - 1] = 0;
+	breakinfo[i].st = save_stack();
 	breakinfo[i].race_found = 1;
 	atomic_inc(&race_counter);
 
@@ -1535,6 +1586,47 @@ hwbp_clear_impl(struct hwbp *bp)
 	return;
 }
 
+/* Let us defer reporting races to a wq to avoid additional delays in the
+ * BP handlers.
+ *
+ * Should be called under hwbp_lock. */
+static void
+queue_hwbp_race_report(struct hwbp *hwbp)
+{
+	struct rh_race *race;
+	depot_stack_handle_t st;
+
+	if (!hwbp->st) {
+		pr_info("[rh] Failed to to save the stack trace of the thread that hit the HW BP.\n");
+		return;
+	}
+
+	st = save_stack();
+	if (!st) {
+		pr_info("[rh] Failed to to save the stack trace of the thread that hit the SW BP.\n");
+		return;
+	}
+
+	race = kzalloc(sizeof(*race), GFP_ATOMIC);
+	if (!race) {
+		pr_info("[rh] Failed to allocate struct rh_race.\n");
+		return;
+	}
+
+	race->stacks.st[0] = st;
+	race->stacks.st[1] = hwbp->st;
+
+	/* TASK_COMM_LEN - 1, just in case current->comm is not
+	 * 0-terminated. */
+	strncpy(race->comm0, current->comm, TASK_COMM_LEN - 1);
+	memcpy(race->comm1, hwbp->comm, TASK_COMM_LEN);
+	race->addr = hwbp->addr;
+	race->size = hwbp->len;
+
+	INIT_WORK(&race->work, do_report_race_work);
+	queue_work(wq, &race->work);
+}
+
 /* Clear the HW BP with the given index in breakinfo[].
  * The BP is cleared directly on the current CPU. A function is scheduled to
  * clear it on the remaining CPUs.
@@ -1562,6 +1654,8 @@ hwbp_clear(int breakno)
 	}
 
 	race_found = breakinfo[breakno].race_found;
+	if (race_found)
+		queue_hwbp_race_report(&breakinfo[breakno]);
 
 	for_each_online_cpu(cpu) {
 		struct timer_list *t = NULL;
@@ -1981,6 +2075,52 @@ do_swbp_work(struct work_struct *work)
 	wake_up(&waitq);
 }
 
+/*
+ * Queue a work to report the race found using repeated read.
+ */
+static void
+queue_rr_race_report(unsigned long addr, unsigned int size)
+{
+	struct rh_race *race;
+	depot_stack_handle_t st;
+
+	st = save_stack();
+	if (!st) {
+		pr_info("[rh] Failed to to save the stack trace of the thread that hit the SW BP.\n");
+		return;
+	}
+
+	race = kzalloc(sizeof(*race), GFP_ATOMIC);
+	if (!race) {
+		pr_info("[rh] Failed to allocate struct rh_race.\n");
+		return;
+	}
+
+	race->stacks.st[0] = st;
+	/* st[1] remains 0: we know nothing about the 2nd thread. */
+
+	/*
+	 * Copy current->comm to make sure it ends with 0.
+	 * We cannot take task_lock here because it will lead to a deadlock
+	 * in the (rare) case when the code under analysis already executed
+	 * under that lock. If someone is changing the contents of
+	 * current->comm now, our copy may contain garbage but, at least,
+	 * it can be output without harm for the system.
+	 *
+	 * [NB] strncpy() does not add a terminating 0, if it does not fit
+	 * in the given size. So we add it explicitly. strlcpy could help
+	 * but it may call strlen and thus requires current->comm to be a
+	 * valid 0-terminated string. We must handle other cases too,
+	 * however, so strlcpy is not an option.
+	 */
+	strncpy(race->comm0, current->comm, TASK_COMM_LEN - 1);
+	race->addr = addr;
+	race->size = size;
+
+	INIT_WORK(&race->work, do_report_race_work);
+	queue_work(wq, &race->work);
+}
+
 /* The "lite" pre-handler. Executes before the insn of interest in the same
  * conditions as that insn (IRQ enabled/disabled, etc.) except the
  * preemption is disabled by the Kprobe.
@@ -2070,27 +2210,7 @@ rh_do_before_insn(void)
 	 * check if the data in the accessed memory area have changed
 	 * ("repeated read technique"). */
 	if (!race_found && memcmp(&data[0], mi.addr, nbytes_to_check) != 0) {
-		char comm[TASK_COMM_LEN];
-		/* Copy task->comm to a local buffer to make sure it ends
-		 * with 0. We cannot take task_lock here because it will
-		 * lead to a deadlock in the (rare) case when the code under
-		 * analysis already executed under that lock.
-		 * If someone is changing the contents of task->comm now,
-		 * our copy may contain garbage but, at least, it can be
-		 * output without harm for the system.
-		 *
-		 * [NB] strncpy() does not add a terminating 0, if it does
-		 * not fit in the given size. So we add it explicitly.
-		 * strlcpy could help but it may call strlen and thus
-		 * requires swbp_hit->task->comm to be a valid 0-terminated
-		 * string. We must handle other cases too, however, so
-		 * strlcpy is not an option. */
-		strncpy(comm, swbp_hit->task->comm, TASK_COMM_LEN - 1);
-		comm[TASK_COMM_LEN - 1] = 0;
-
-		report_race_event(&events, mi.addr,
-				  swbp_to_string(swbp_hit->swbp), comm,
-				  0, NULL, true);
+		queue_rr_race_report((unsigned long)mi.addr, mi.size);
 		atomic_inc(&race_counter);
 	}
 
@@ -2752,9 +2872,12 @@ static int __init
 rh_module_init(void)
 {
 	int ret = 0;
+
 	/* Better to have Kprobes' insn slots of 15 bytes in size or
 	 * larger. */
 	BUILD_BUG_ON(RH_INSN_SLOT_SIZE < 15);
+
+	memset(race_table, 0, sizeof(race_table));
 
 	init_waitqueue_head(&waitq);
 	init_waitqueue_head(&eventq);
@@ -2845,6 +2968,24 @@ out_hw:
 }
 
 static void __exit
+cleanup_race_table(void)
+{
+	unsigned int i;
+
+	/* No need to lock race_mutex: nothing else can access the table now. */
+	for (i = 0; i < RH_RACE_HASH_SIZE; ++i) {
+		struct rh_race *race = race_table[i];
+
+		while (race) {
+			struct rh_race *next = race->next;
+
+			kfree(race);
+			race = next;
+		}
+	}
+}
+
+static void __exit
 rh_module_exit(void)
 {
 	struct swbp_group *grp;
@@ -2907,6 +3048,8 @@ rh_module_exit(void)
 	remove_debugfs_files();
 	debugfs_remove(debugfs_dir_dentry);
 	event_buffer_destroy(&events);
+	cleanup_race_table();
+	depot_cleanup();
 
 	pr_info("[rh] RaceHound has been unloaded.\n");
 }
