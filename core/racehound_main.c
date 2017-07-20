@@ -104,6 +104,8 @@
 #include "stackdepot.h"
 
 #include "config.h"
+
+#define RH_MSG_PREFIX "[rh] "
 /* ====================================================================== */
 
 /* Maximum stack depth for the stored stack traces. */
@@ -432,7 +434,7 @@ create_swbp(struct swbp_group *grp, int is_init, unsigned int offset,
 
 	swbp = kzalloc(sizeof(*swbp), GFP_KERNEL);
 	if (!swbp) {
-		pr_warning("[rh] Not enough memory for struct swbp.\n");
+		pr_warning(RH_MSG_PREFIX "Not enough memory for struct swbp.\n");
 		return NULL;
 	}
 
@@ -537,10 +539,10 @@ report_race(const struct rh_race *race)
 	if (!trace0.nr_entries)
 		return;
 
-	pr_warning("[rh] %s\n", sep);
-	pr_warning("[rh] Detected a data race on the the memory block at %p, size %u:\n",
+	pr_warning(RH_MSG_PREFIX "%s\n", sep);
+	pr_warning(RH_MSG_PREFIX "Detected a data race on the the memory block at %p, size %u:\n",
 		(void *)race->addr, race->size);
-	pr_warning("[rh] ----- Thread #1, comm: %s ----- \n", race->comm0);
+	pr_warning(RH_MSG_PREFIX "----- Thread #1, comm: %s ----- \n", race->comm0);
 	print_stack_trace(&trace0, 0);
 
 	if (got_both_threads) {
@@ -548,16 +550,16 @@ report_race(const struct rh_race *race)
 		if (!trace1.nr_entries)
 			return;
 
-		pr_warning("[rh] ----- Thread #2, comm: %s ----- \n",
+		pr_warning(RH_MSG_PREFIX "----- Thread #2, comm: %s ----- \n",
 			   race->comm1);
 		print_stack_trace(&trace1, 0);
 	}
 	else {
 		pr_warning(
-			"[rh] ----- Thread #2 - unknown, "
+			RH_MSG_PREFIX "----- Thread #2 - unknown, "
 			"the contents of the memory block changed during the delay. ----- \n");
 	}
-	pr_warning("[rh] %s\n", sep);
+	pr_warning(RH_MSG_PREFIX "%s\n", sep);
 }
 
 static void
@@ -578,7 +580,7 @@ do_report_race_work(struct work_struct *work)
 	 */
 	ret = mutex_lock_killable(&race_mutex);
 	if (ret) {
-		pr_debug("[rh] do_report_race_work: failed to lock the mutex.\n");
+		pr_debug(RH_MSG_PREFIX "do_report_race_work: failed to lock the mutex.\n");
 		kfree(race);
 		return;
 	}
@@ -690,7 +692,7 @@ report_swbp_hit_event(struct event_buffer *e, const char *str_swbp)
 
 	str = kstrdup(str_swbp, GFP_ATOMIC);
 	if (!str) {
-		pr_debug("[rh] report_swbp_hit_event: out of memory.\n");
+		pr_debug(RH_MSG_PREFIX "report_swbp_hit_event: out of memory.\n");
 		atomic_inc(&events_lost);
 		goto out;
 	}
@@ -767,7 +769,7 @@ events_file_read(struct file *filp, char __user *buf, size_t count,
 
 	err = mutex_lock_killable(&event_consumer_mutex);
 	if (err != 0) {
-		pr_warning("[rh] Failed to lock event_consumer_mutex\n");
+		pr_warning(RH_MSG_PREFIX "Failed to lock event_consumer_mutex\n");
 		return -EINTR;
 	}
 
@@ -789,7 +791,7 @@ events_file_read(struct file *filp, char __user *buf, size_t count,
 			events.buf[tail] = NULL;
 			if (!rev->str) {
 				pr_warning(
-			"[rh] events_file_read: unexpected empty event.\n");
+			RH_MSG_PREFIX "events_file_read: unexpected empty event.\n");
 				ret = -EFAULT;
 				goto out;
 			}
@@ -848,7 +850,7 @@ events_file_poll(struct file *filp, poll_table *wait)
 
 	err = mutex_lock_killable(&event_consumer_mutex);
 	if (err != 0) {
-		pr_warning("[rh] Failed to lock event_consumer_mutex\n");
+		pr_warning(RH_MSG_PREFIX "Failed to lock event_consumer_mutex\n");
 		return ret;
 	}
 
@@ -889,7 +891,7 @@ kp_pre(struct kprobe *p, struct pt_regs *regs)
 
 	swbp_hit = kzalloc(sizeof(*swbp_hit), GFP_ATOMIC);
 	if (!swbp_hit) {
-		pr_warning("[rh] Out of memory.\n");
+		pr_warning(RH_MSG_PREFIX "Out of memory.\n");
 		/* [NB] The Kprobe has a post-handler, so "boost" will not
 		 * be used. This is good, because the insn slot contains
 		 * our jump after the insn and that jump must not be
@@ -998,7 +1000,7 @@ arm_swbp(struct swbp *swbp)
 
 	if (swbp->armed) {
 		pr_warning(
-		"[rh] Attempt to arm an already armed SW BP (%s).\n",
+		RH_MSG_PREFIX "Attempt to arm an already armed SW BP (%s).\n",
 			swbp_to_string(swbp));
 		return -EINVAL;
 	}
@@ -1021,7 +1023,7 @@ arm_swbp(struct swbp *swbp)
 		}
 		else {
 			pr_warning(
-			"[rh] The module %s has no init area now.\n",
+			RH_MSG_PREFIX "The module %s has no init area now.\n",
 				module_name(mod));
 			return -EINVAL;
 		}
@@ -1034,7 +1036,7 @@ arm_swbp(struct swbp *swbp)
 		}
 		else {
 			pr_warning(
-			"[rh] The module %s has no core area now.\n",
+			RH_MSG_PREFIX "The module %s has no core area now.\n",
 				module_name(mod));
 			return -EINVAL;
 		}
@@ -1048,13 +1050,13 @@ arm_swbp(struct swbp *swbp)
 	ret = register_kprobe(&swbp->kp);
 	if (ret) {
 		pr_warning(
-		"[rh] Failed to register Kprobe for the SW BP (%s).\n",
+		RH_MSG_PREFIX "Failed to register Kprobe for the SW BP (%s).\n",
 			swbp_to_string(swbp));
 		return ret;
 	}
 
 	if (swbp->kp.ainsn.insn == NULL) {
-		pr_warning("[rh] No insn slot in the Kprobe for %s.\n",
+		pr_warning(RH_MSG_PREFIX "No insn slot in the Kprobe for %s.\n",
 			swbp_to_string(swbp));
 		ret = -EFAULT;
 		goto out_unreg;
@@ -1068,14 +1070,14 @@ arm_swbp(struct swbp *swbp)
 
 	len = rh_insn_get_length(swbp->rh_insn);
 	if (len == 0) {
-		pr_warning("[rh] Illegal instruction (BP: %s).\n",
+		pr_warning(RH_MSG_PREFIX "Illegal instruction (BP: %s).\n",
 			swbp_to_string(swbp));
 		ret = -EILSEQ;
 		goto out_free_insn;
 	}
 
 	if (!rh_should_process_insn(swbp->rh_insn)) {
-		pr_warning("[rh] Unable to process the instruction at %s.\n",
+		pr_warning(RH_MSG_PREFIX "Unable to process the instruction at %s.\n",
 			swbp_to_string(swbp));
 		ret = -EINVAL;
 		goto out_free_insn;
@@ -1083,7 +1085,7 @@ arm_swbp(struct swbp *swbp)
 
 	swbp->base_size = rh_get_base_size(swbp->rh_insn);
 	if (swbp->base_size == 0) {
-		pr_warning("[rh] "
+		pr_warning(RH_MSG_PREFIX ""
 "Failed to find the size of the memory block the insn at %s may access.\n",
 			swbp_to_string(swbp));
 		ret = -EINVAL;
@@ -1093,7 +1095,7 @@ arm_swbp(struct swbp *swbp)
 	/* The insn and the jump near relative following it must fit into
 	 * the slot. */
 	if (len + RH_JMP_REL_SIZE > RH_INSN_SLOT_SIZE) {
-		pr_warning("[rh] "
+		pr_warning(RH_MSG_PREFIX ""
 "Unable to handle the instruction at %s: it is too long (%d byte(s)).\n",
 			swbp_to_string(swbp), len);
 		ret = -EINVAL;
@@ -1111,21 +1113,21 @@ arm_swbp(struct swbp *swbp)
 	 * rh_should_process_insn() returns 0 for these. */
 	ret = mutex_lock_killable(p_text_mutex);
 	if (ret) {
-		pr_warning("[rh] Failed to lock text_mutex.\n");
+		pr_warning(RH_MSG_PREFIX "Failed to lock text_mutex.\n");
 		goto out_free_insn;
 	}
 	ret = write_jump((u8 *)swbp->kp.ainsn.insn + len);
 	mutex_unlock(p_text_mutex);
 
 	if (ret) {
-		pr_warning("[rh] Failed to place jump into the insn slot for %s.\n",
+		pr_warning(RH_MSG_PREFIX "Failed to place jump into the insn slot for %s.\n",
 			swbp_to_string(swbp));
 		goto out_free_insn;
 	}
 
 	ret = enable_kprobe(&swbp->kp);
 	if (ret) {
-		pr_warning("[rh] Failed to enable Kprobe for %s.\n",
+		pr_warning(RH_MSG_PREFIX "Failed to enable Kprobe for %s.\n",
 			swbp_to_string(swbp));
 		goto out_free_insn;
 	}
@@ -1214,7 +1216,7 @@ create_swbp_group(char *module_name)
 	grp = kzalloc(sizeof(*grp), GFP_KERNEL);
 	if (!grp) {
 		pr_warning(
-			"[rh] Not enough memory for struct swbp_group.\n");
+			RH_MSG_PREFIX "Not enough memory for struct swbp_group.\n");
 		return NULL;
 	}
 
@@ -1224,7 +1226,7 @@ create_swbp_group(char *module_name)
 	if (grp->module_name) {
 		int ret = mutex_lock_killable(&module_mutex);
 		if (ret != 0) {
-			pr_warning("[rh] Failed to lock module_mutex\n");
+			pr_warning(RH_MSG_PREFIX "Failed to lock module_mutex\n");
 			kfree(grp);
 			return NULL;
 		}
@@ -1332,7 +1334,7 @@ hwbp_handler(struct perf_event *event, struct perf_sample_data *data,
 			break;
 	}
 	if (i == HBP_NUM) {
-		pr_info("[rh] "
+		pr_info(RH_MSG_PREFIX ""
 			"Failed to find the relevant hwbp structure.\n");
 		goto out;
 	}
@@ -1378,7 +1380,7 @@ hwbp_set_impl(struct hwbp *bp)
 	}
 
 	if (pevent[0]->attr.bp_addr != placeholder_addr) {
-		pr_warning("[rh] Setting a BP that was not cleared.\n");
+		pr_warning(RH_MSG_PREFIX "Setting a BP that was not cleared.\n");
 	}
 
 	pevent[0]->attr.bp_addr = bp->addr;
@@ -1394,7 +1396,7 @@ hwbp_set_impl(struct hwbp *bp)
 	if (ret != 0) {
 		pevent[0]->attr.disabled = 1;
 		--bp->usage_count;
-		pr_warning("[rh] Failed to set the HW BP, errno: %d.\n",
+		pr_warning(RH_MSG_PREFIX "Failed to set the HW BP, errno: %d.\n",
 			   ret);
 	}
 	return ret;
@@ -1489,7 +1491,7 @@ hwbp_set(unsigned long addr, int len, int type, unsigned long max_delay,
 		 * conditions to occur at a fast rate, e.g., on repetitive
 		 * accesses to the same data. */
 		pr_debug(
-"[rh] Unable to set a HW BP: all breakpoints are already in use.\n");
+RH_MSG_PREFIX "Unable to set a HW BP: all breakpoints are already in use.\n");
 		ret = -EBUSY;
 		goto out;
 	}
@@ -1597,19 +1599,19 @@ queue_hwbp_race_report(struct hwbp *hwbp)
 	depot_stack_handle_t st;
 
 	if (!hwbp->st) {
-		pr_info("[rh] Failed to to save the stack trace of the thread that hit the HW BP.\n");
+		pr_info(RH_MSG_PREFIX "Failed to to save the stack trace of the thread that hit the HW BP.\n");
 		return;
 	}
 
 	st = save_stack();
 	if (!st) {
-		pr_info("[rh] Failed to to save the stack trace of the thread that hit the SW BP.\n");
+		pr_info(RH_MSG_PREFIX "Failed to to save the stack trace of the thread that hit the SW BP.\n");
 		return;
 	}
 
 	race = kzalloc(sizeof(*race), GFP_ATOMIC);
 	if (!race) {
-		pr_info("[rh] Failed to allocate struct rh_race.\n");
+		pr_info(RH_MSG_PREFIX "Failed to allocate struct rh_race.\n");
 		return;
 	}
 
@@ -1649,7 +1651,7 @@ hwbp_clear(int breakno)
 	breakinfo[breakno].swbp_hit = NULL;
 
 	if (!breakinfo[breakno].usage_count) {
-		pr_info("[rh] The BP has already been disabled.\n");
+		pr_info(RH_MSG_PREFIX "The BP has already been disabled.\n");
 		goto out;
 	}
 
@@ -1786,7 +1788,7 @@ init_hw_breakpoints(void)
 		breakinfo[i].pev = register_wide_hw_breakpoint(
 			&attr, NULL, NULL);
 		if (IS_ERR((void * __force)breakinfo[i].pev)) {
-			pr_warning("[rh] Failed to register HW BPs.\n");
+			pr_warning(RH_MSG_PREFIX "Failed to register HW BPs.\n");
 			ret = PTR_ERR((void * __force)breakinfo[i].pev);
 			breakinfo[i].pev = NULL;
 			goto fail;
@@ -1795,7 +1797,7 @@ init_hw_breakpoints(void)
 		breakinfo[i].timers_set = alloc_percpu(struct timer_list);
 		if (breakinfo[i].timers_set == NULL) {
 			pr_warning(
-				"[rh] Failed to allocate .timers_set.\n");
+				RH_MSG_PREFIX "Failed to allocate .timers_set.\n");
 			ret = -ENOMEM;
 			goto fail;
 		}
@@ -1803,7 +1805,7 @@ init_hw_breakpoints(void)
 		breakinfo[i].timers_clear = alloc_percpu(struct timer_list);
 		if (breakinfo[i].timers_clear == NULL) {
 			pr_warning(
-				"[rh] Failed to allocate .timers_clear.\n");
+				RH_MSG_PREFIX "Failed to allocate .timers_clear.\n");
 			ret = -ENOMEM;
 			goto fail;
 		}
@@ -1841,13 +1843,13 @@ validate_insn_in_module(int is_init, unsigned int offset,
 	if (is_init) {
 		if (!module_init_addr(mod)) {
 			pr_warning(
-"[rh] The insn is in the init area but \"%s\" module has no init area.\n",
+RH_MSG_PREFIX "The insn is in the init area but \"%s\" module has no init area.\n",
 				module_name(mod));
 			return -EINVAL;
 		}
 
 		if (offset >= init_text_size(mod)) {
-			pr_warning("[rh] "
+			pr_warning(RH_MSG_PREFIX ""
 	"The insn at offset 0x%x is not in the init area of \"%s\".\n",
 			offset, module_name(mod));
 			return -ERANGE;
@@ -1857,13 +1859,13 @@ validate_insn_in_module(int is_init, unsigned int offset,
 	else {
 		if (!module_core_addr(mod)) {
 			pr_warning(
-"[rh] The insn is in the core area but \"%s\" module has no core area.\n",
+RH_MSG_PREFIX "The insn is in the core area but \"%s\" module has no core area.\n",
 				module_name(mod));
 			return -EINVAL;
 		}
 
 		if (offset >= core_text_size(mod)) {
-			pr_warning("[rh] "
+			pr_warning(RH_MSG_PREFIX ""
 	"The insn at offset 0x%x is not in the core area of \"%s\".\n",
 			offset, module_name(mod));
 			return -ERANGE;
@@ -1898,7 +1900,7 @@ handle_module_load(struct module *mod)
 		    0 != arm_swbp(swbp)) {
 
 			pr_warning(
-		"[rh] Unable to set the BP (%s), removing it.\n",
+		RH_MSG_PREFIX "Unable to set the BP (%s), removing it.\n",
 				swbp_to_string(swbp));
 			list_del(&swbp->list);
 			kref_put(&swbp->kref, destroy_swbp);
@@ -1961,7 +1963,7 @@ rh_module_notifier_call(struct notifier_block *nb, unsigned long mod_state,
 		 * takes the lock and disarms the BPs then. */
 		ret = mutex_lock_killable(&swbp_mutex);
 		if (ret != 0) {
-			pr_warning("[rh] Failed to lock swbp_mutex.\n");
+			pr_warning(RH_MSG_PREFIX "Failed to lock swbp_mutex.\n");
 			break;
 		}
 		handle_module_load(mod);
@@ -2086,13 +2088,13 @@ queue_rr_race_report(unsigned long addr, unsigned int size)
 
 	st = save_stack();
 	if (!st) {
-		pr_info("[rh] Failed to to save the stack trace of the thread that hit the SW BP.\n");
+		pr_info(RH_MSG_PREFIX "Failed to to save the stack trace of the thread that hit the SW BP.\n");
 		return;
 	}
 
 	race = kzalloc(sizeof(*race), GFP_ATOMIC);
 	if (!race) {
-		pr_info("[rh] Failed to allocate struct rh_race.\n");
+		pr_info(RH_MSG_PREFIX "Failed to allocate struct rh_race.\n");
 		return;
 	}
 
@@ -2149,7 +2151,7 @@ rh_do_before_insn(void)
 	ret = rh_fill_ma_info(&mi, swbp_hit->swbp->rh_insn, &swbp_hit->regs,
 			      swbp_hit->swbp->base_size);
 	if (ret) {
-		pr_warning("[rh] "
+		pr_warning(RH_MSG_PREFIX ""
 "Failed to find the address of the memory area the insn will access.\n");
 		goto out;
 	}
@@ -2194,7 +2196,7 @@ rh_do_before_insn(void)
 		 * fast rate. An alternative would be to rate-limit the
 		 * message output. */
 		pr_debug(
-	"[rh] Failed to set a hardware breakpoint at %p (SW BP: %s).\n",
+	RH_MSG_PREFIX "Failed to set a hardware breakpoint at %p (SW BP: %s).\n",
 			mi.addr, swbp_to_string(swbp_hit->swbp));
 		goto out;
 	}
@@ -2274,7 +2276,7 @@ bp_file_open(struct inode *inode, struct file *filp)
 
 	ret = mutex_lock_killable(&swbp_mutex);
 	if (ret != 0) {
-		pr_warning("[rh] Failed to lock swbp_mutex\n");
+		pr_warning(RH_MSG_PREFIX "Failed to lock swbp_mutex\n");
 		return ret;
 	}
 
@@ -2451,7 +2453,7 @@ parse_bp_string(char *str, int *is_init, unsigned int *offset,
 	return module_name;
 
 invalid_str:
-	pr_warning("[rh] Invalid breakpoint string: \"%s\".\n", orig);
+	pr_warning(RH_MSG_PREFIX "Invalid breakpoint string: \"%s\".\n", orig);
 	kfree(module_name);
 	return ERR_PTR(err);
 }
@@ -2464,13 +2466,13 @@ process_kernel_address(struct swbp_group *grp, int is_init,
 	struct swbp *swbp;
 
 	if (is_init) {
-		pr_warning("[rh] "
+		pr_warning(RH_MSG_PREFIX ""
 		"Monitoring of the kernel init code is not supported.\n");
 		return -EINVAL;
 	}
 
 	if (offset >= kernel_text_size) {
-		pr_warning("[rh] "
+		pr_warning(RH_MSG_PREFIX ""
 		"The offset 0x%x is outside of the kernel (size = 0x%x).\n",
 			offset, kernel_text_size);
 		return -ERANGE;
@@ -2483,7 +2485,7 @@ process_kernel_address(struct swbp_group *grp, int is_init,
 	ret = arm_swbp(swbp);
 	if (ret) {
 		pr_warning(
-			"[rh] Unable to set the BP (%s), removing it.\n",
+			RH_MSG_PREFIX "Unable to set the BP (%s), removing it.\n",
 			swbp_to_string(swbp));
 		list_del(&swbp->list);
 		kref_put(&swbp->kref, destroy_swbp);
@@ -2527,7 +2529,7 @@ process_module_address(struct swbp_group *grp, int is_init,
 	ret = arm_swbp(swbp);
 	if (ret) {
 		pr_warning(
-			"[rh] Unable to set the BP at (%s), removing it.\n",
+			RH_MSG_PREFIX "Unable to set the BP at (%s), removing it.\n",
 			swbp_to_string(swbp));
 		list_del(&swbp->list);
 		kref_put(&swbp->kref, destroy_swbp);
@@ -2624,12 +2626,12 @@ bp_file_write(struct file *filp, const char __user *buf,
 
 	ret = mutex_lock_killable(&swbp_mutex);
 	if (ret != 0) {
-		pr_warning("[rh] Failed to lock swbp_mutex.\n");
+		pr_warning(RH_MSG_PREFIX "Failed to lock swbp_mutex.\n");
 		goto out_name;
 	}
 
 	if (!bps_enabled) {
-		pr_warning("[rh] Processing of breakpoints is disabled.\n");
+		pr_warning(RH_MSG_PREFIX "Processing of breakpoints is disabled.\n");
 		ret = -EINVAL;
 		goto out_unlock;
 	}
@@ -2647,7 +2649,7 @@ bp_file_write(struct file *filp, const char __user *buf,
 
 		if (!swbp) {
 			pr_info(
-			"[rh] Got a request to remove an unknown BP: %s\n",
+			RH_MSG_PREFIX "Got a request to remove an unknown BP: %s\n",
 				str);
 			ret = -EINVAL;
 			goto out_unlock;
@@ -2688,7 +2690,7 @@ bp_file_write(struct file *filp, const char __user *buf,
 		swbp = find_swbp(grp, is_init, offset);
 		if (swbp) {
 			pr_info(
-		"[rh] Unable to add the BP (%s), it already exists.\n",
+		RH_MSG_PREFIX "Unable to add the BP (%s), it already exists.\n",
 				str);
 			ret = -EINVAL;
 			goto out_unlock;
@@ -2745,7 +2747,7 @@ find_kernel_api(void)
 		"arch_install_hw_breakpoint");
 	if (do_arch_install_hwbp == NULL) {
 		pr_warning(
-		"[rh] Symbol not found: 'arch_install_hw_breakpoint'\n");
+		RH_MSG_PREFIX "Symbol not found: 'arch_install_hw_breakpoint'\n");
 		return -EINVAL;
 	}
 
@@ -2753,7 +2755,7 @@ find_kernel_api(void)
 		"arch_uninstall_hw_breakpoint");
 	if (do_arch_uninstall_hwbp == NULL) {
 		pr_warning(
-		"[rh] Symbol not found: 'arch_uninstall_hw_breakpoint'\n");
+		RH_MSG_PREFIX "Symbol not found: 'arch_uninstall_hw_breakpoint'\n");
 		return -EINVAL;
 	}
 
@@ -2761,7 +2763,7 @@ find_kernel_api(void)
 		(struct kprobe **)kallsyms_lookup_name("current_kprobe");
 	if (p_current_kprobe == NULL) {
 		pr_warning(
-		"[rh] Symbol not found: 'current_kprobe'.\n");
+		RH_MSG_PREFIX "Symbol not found: 'current_kprobe'.\n");
 		return -EINVAL;
 	}
 
@@ -2770,17 +2772,17 @@ find_kernel_api(void)
 	 * 64-bit x86. */
 	stext = (unsigned long)kallsyms_lookup_name("_text");
 	if (stext == 0) {
-		pr_warning("[rh] Not found: _text\n");
+		pr_warning(RH_MSG_PREFIX "Not found: _text\n");
 		return -EINVAL;
 	}
 
 	etext = (unsigned long)kallsyms_lookup_name("_etext");
 	if (etext == 0) {
-		pr_warning("[rh] Not found: _etext\n");
+		pr_warning(RH_MSG_PREFIX "Not found: _etext\n");
 		return -EINVAL;
 	}
 	if (stext >= etext) {
-		pr_warning("[rh] "
+		pr_warning(RH_MSG_PREFIX ""
 		"Found invalid values of _text (%p) and _etext (%p).\n",
 			(void *)stext, (void *)etext);
 		return -EINVAL;
@@ -2788,7 +2790,7 @@ find_kernel_api(void)
 
 	kernel_text_size = (unsigned int)(etext - stext);
 	if ((unsigned long)kernel_text_size != (etext - stext)) {
-		pr_warning("[rh] "
+		pr_warning(RH_MSG_PREFIX ""
 		"The size of the kernel is too large: %lu byte(s).\n",
 			etext - stext);
 		return -ERANGE;
@@ -2797,21 +2799,21 @@ find_kernel_api(void)
 	do_set_memory_rw = (void *)kallsyms_lookup_name("set_memory_rw");
 	if (do_set_memory_rw == NULL) {
 		pr_warning(
-		"[rh] Symbol not found: 'set_memory_rw'\n");
+		RH_MSG_PREFIX "Symbol not found: 'set_memory_rw'\n");
 		return -EINVAL;
 	}
 
 	do_set_memory_ro = (void *)kallsyms_lookup_name("set_memory_ro");
 	if (do_set_memory_ro == NULL) {
 		pr_warning(
-		"[rh] Symbol not found: 'set_memory_ro'\n");
+		RH_MSG_PREFIX "Symbol not found: 'set_memory_ro'\n");
 		return -EINVAL;
 	}
 
 	p_text_mutex = (void *)kallsyms_lookup_name("text_mutex");
 	if (p_text_mutex == NULL) {
 		pr_warning(
-		"[rh] Symbol not found: 'text_mutex'\n");
+		RH_MSG_PREFIX "Symbol not found: 'text_mutex'\n");
 		return -EINVAL;
 	}
 	return 0;
@@ -2862,7 +2864,7 @@ create_debugfs_files(void)
 
 	return 0;
 fail:
-	pr_warning("[rh] Failed to create file \"%s\" in debugfs.\n",
+	pr_warning(RH_MSG_PREFIX "Failed to create file \"%s\" in debugfs.\n",
 		   name);
 	remove_debugfs_files();
 	return -ENOMEM;
@@ -2891,40 +2893,40 @@ rh_module_init(void)
 	/* Keep this first: the following calls may need the API it finds.*/
 	ret = find_kernel_api();
 	if (ret != 0) {
-		pr_warning("[rh] Failed to find the needed kernel API.\n");
+		pr_warning(RH_MSG_PREFIX "Failed to find the needed kernel API.\n");
 		return ret;
 	}
 
 	ret = init_hw_breakpoints();
 	if (ret != 0) {
-		pr_warning("[rh] "
+		pr_warning(RH_MSG_PREFIX ""
 	"Failed to initialize breakpoint handling facilities.\n");
 		return ret;
 	}
 
 	wq = create_workqueue("racehound_wq");
 	if (wq == NULL) {
-		pr_warning("[rh] Failed to create a workqueue.\n");
+		pr_warning(RH_MSG_PREFIX "Failed to create a workqueue.\n");
 		ret = -ENOMEM;
 		goto out_hw;
 	}
 
 	ret = event_buffer_init(&events);
 	if (ret != 0) {
-		pr_warning("[rh] Failed to initialize the event buffer.\n");
+		pr_warning(RH_MSG_PREFIX "Failed to initialize the event buffer.\n");
 		goto out_wq;
 	}
 
 	debugfs_dir_dentry = debugfs_create_dir(debugfs_dir_name, NULL);
 	if (IS_ERR(debugfs_dir_dentry)) {
-		pr_warning("[rh] Debugfs is not supported\n");
+		pr_warning(RH_MSG_PREFIX "Debugfs is not supported\n");
 		ret = -ENODEV;
 		goto out_events;
 	}
 
 	if (debugfs_dir_dentry == NULL) {
 		pr_warning(
-			"[rh] Failed to create a directory in debugfs\n");
+			RH_MSG_PREFIX "Failed to create a directory in debugfs\n");
 		ret = -EINVAL;
 		goto out_events;
 	}
@@ -2935,7 +2937,7 @@ rh_module_init(void)
 
 	ret = register_module_notifier(&module_event_nb);
 	if (ret != 0) {
-		pr_warning("[rh] Failed to register module notifier.\n");
+		pr_warning(RH_MSG_PREFIX "Failed to register module notifier.\n");
 		goto out_rmfiles;
 	}
 
@@ -2943,13 +2945,13 @@ rh_module_init(void)
 	 * add or remove the SW BPs. */
 	ret = mutex_lock_killable(&swbp_mutex);
 	if (ret != 0) {
-		pr_warning("[rh] Failed to lock swbp_mutex.\n");
+		pr_warning(RH_MSG_PREFIX "Failed to lock swbp_mutex.\n");
 		goto out_unreg_module;
 	}
 	bps_enabled = true;
 	mutex_unlock(&swbp_mutex);
 
-	pr_info("[rh] RaceHound has been loaded.\n");
+	pr_info(RH_MSG_PREFIX "RaceHound has been loaded.\n");
 	return 0;
 
 out_unreg_module:
@@ -3051,7 +3053,7 @@ rh_module_exit(void)
 	cleanup_race_table();
 	depot_cleanup();
 
-	pr_info("[rh] RaceHound has been unloaded.\n");
+	pr_info(RH_MSG_PREFIX "RaceHound has been unloaded.\n");
 }
 
 module_init(rh_module_init);
