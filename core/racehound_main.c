@@ -127,7 +127,12 @@ struct rh_race {
 		depot_stack_handle_t st[2];
 	} stacks;
 
-	/* The threads that accessed the given memory area. */
+	/*
+	 * IP (address of the instruction) and comm for each of the threads
+	 * that accessed the given memory area.
+	 */
+	unsigned long ip0;
+	unsigned long ip1;	/* 0 in case of repeated read */
 	char comm0[TASK_COMM_LEN];
 	char comm1[TASK_COMM_LEN];
 
@@ -542,7 +547,9 @@ report_race(const struct rh_race *race)
 	pr_warning(RH_MSG_PREFIX "%s\n", sep);
 	pr_warning(RH_MSG_PREFIX "Detected a data race on the the memory block at %p, size %u:\n",
 		(void *)race->addr, race->size);
-	pr_warning(RH_MSG_PREFIX "----- Thread #1, comm: %s ----- \n", race->comm0);
+	pr_warning(RH_MSG_PREFIX "----- Thread #1, comm: %s ----- \n",
+		   race->comm0);
+	pr_warning(RH_MSG_PREFIX "IP: %pS\n", (void *)race->ip0);
 	print_stack_trace(&trace0, 0);
 
 	if (got_both_threads) {
@@ -550,8 +557,11 @@ report_race(const struct rh_race *race)
 		if (!trace1.nr_entries)
 			return;
 
-		pr_warning(RH_MSG_PREFIX "----- Thread #2, comm: %s ----- \n",
+		pr_warning(RH_MSG_PREFIX
+			   "----- Thread #2, comm: %s ----- \n",
 			   race->comm1);
+		pr_warning(RH_MSG_PREFIX "IP: right before %pS\n",
+			   (void *)race->ip1);
 		print_stack_trace(&trace1, 0);
 	}
 	else {
@@ -587,7 +597,9 @@ do_report_race_work(struct work_struct *work)
 
 	for (found = *bucket; found; found = found->next) {
 		if (found->stacks.st[0] == race->stacks.st[0] &&
-		    found->stacks.st[1] == race->stacks.st[1]) {
+		    found->stacks.st[1] == race->stacks.st[1] &&
+		    found->ip0 == race->ip0 &&
+		    found->ip1 == race->ip1) {
 			break;
 		}
 	}
@@ -1293,8 +1305,15 @@ static struct hwbp {
 	struct timer_list __percpu *timers_set;
 	struct timer_list __percpu *timers_clear;
 
-	/* Info about the thread that hit the HW BP: comm & stack trace.
+	/*
+	 * Spare copy of the address where the SW BP was placed. Makes
+	 * reporting a bit easier.
+	 */
+	unsigned long ip0;
+
+	/* Info about the thread that hit the HW BP: IP, stack trace & comm.
 	 * Meaningful only if race_found != 0. */
+	unsigned long ip1;
 	char comm[TASK_COMM_LEN];
 	depot_stack_handle_t st;
 
@@ -1342,12 +1361,15 @@ hwbp_handler(struct perf_event *event, struct perf_sample_data *data,
 	/* May happen if a CPU schedules a timer to clear the HW BP on
 	 * another CPU and the HW BP triggers on the latter before the timer
 	 * function. .swbp_hit is set to NULL under hwbp_lock before
-	 * scheduling the timer. */
+	 * scheduling the timer. So if .swbp_hit is not NULL here, we can
+	 * safely access its fields. */
 	if (breakinfo[i].swbp_hit == NULL)
 		goto out;
 
 	strncpy(breakinfo[i].comm, current->comm, TASK_COMM_LEN - 1);
 	breakinfo[i].comm[TASK_COMM_LEN - 1] = 0;
+	breakinfo[i].ip0 = (unsigned long)breakinfo[i].swbp_hit->swbp->kp.addr;
+	breakinfo[i].ip1 = regs->ip;
 	breakinfo[i].st = save_stack();
 	breakinfo[i].race_found = 1;
 	atomic_inc(&race_counter);
@@ -1617,6 +1639,8 @@ queue_hwbp_race_report(struct hwbp *hwbp)
 
 	race->stacks.st[0] = st;
 	race->stacks.st[1] = hwbp->st;
+	race->ip0 = hwbp->ip0;
+	race->ip1 = hwbp->ip1;
 
 	/* TASK_COMM_LEN - 1, just in case current->comm is not
 	 * 0-terminated. */
@@ -2081,7 +2105,7 @@ do_swbp_work(struct work_struct *work)
  * Queue a work to report the race found using repeated read.
  */
 static void
-queue_rr_race_report(unsigned long addr, unsigned int size)
+queue_rr_race_report(unsigned long ip, unsigned long addr, unsigned int size)
 {
 	struct rh_race *race;
 	depot_stack_handle_t st;
@@ -2098,8 +2122,9 @@ queue_rr_race_report(unsigned long addr, unsigned int size)
 		return;
 	}
 
+	race->ip0 = ip;
 	race->stacks.st[0] = st;
-	/* st[1] remains 0: we know nothing about the 2nd thread. */
+	/* ip1 and st[1] remain 0: we know nothing about the 2nd thread. */
 
 	/*
 	 * Copy current->comm to make sure it ends with 0.
@@ -2195,8 +2220,8 @@ rh_do_before_insn(void)
 		/* pr_debug() only, because such conditions may occur at a
 		 * fast rate. An alternative would be to rate-limit the
 		 * message output. */
-		pr_debug(
-	RH_MSG_PREFIX "Failed to set a hardware breakpoint at %p (SW BP: %s).\n",
+		pr_debug(RH_MSG_PREFIX
+		"Failed to set a hardware breakpoint at %p (SW BP: %s).\n",
 			mi.addr, swbp_to_string(swbp_hit->swbp));
 		goto out;
 	}
@@ -2212,7 +2237,9 @@ rh_do_before_insn(void)
 	 * check if the data in the accessed memory area have changed
 	 * ("repeated read technique"). */
 	if (!race_found && memcmp(&data[0], mi.addr, nbytes_to_check) != 0) {
-		queue_rr_race_report((unsigned long)mi.addr, mi.size);
+		unsigned long ip = (unsigned long)swbp_hit->swbp->kp.addr;
+
+		queue_rr_race_report(ip, (unsigned long)mi.addr, mi.size);
 		atomic_inc(&race_counter);
 	}
 
