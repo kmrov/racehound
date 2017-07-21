@@ -191,6 +191,10 @@ doTest()
 	wait ${plus_pid}
 	wait ${minus_pid}
 
+	# Wait a bit more for the RaceHound to report the races and resolve
+	# the addresses there before unloading the target module.
+	sleep 5
+
 	unloadTarget "${TARGET_NAME}"
 	unloadTarget "${COMMON_TARGET_NAME}"
 }

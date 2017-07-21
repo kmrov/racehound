@@ -101,6 +101,10 @@ doTestImpl()
 
 	# Wait until the background process is finished.
 	wait ${plus_pid}
+
+	# Wait a bit more for the RaceHound to report the races and resolve
+	# the addresses there before unloading the target module.
+	sleep 5
 }
 
 checkFoundRaces()

@@ -85,6 +85,10 @@ loadTarget()
 # $1 - name of the module to unload
 unloadTarget()
 {
+	# Wait a bit more for the RaceHound to report the races and resolve
+	# the addresses there before unloading the target module.
+	sleep 5
+
 	lsmod | grep "$1" > /dev/null 2>&1
 	if test $? -eq 0; then
 		rmmod "$1"
