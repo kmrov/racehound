@@ -1292,10 +1292,11 @@ static struct hwbp {
 	unsigned long max_time;
 
 	/* Parameters of the BP: start address and length of the memory area
-	 * of interest and type of the BP. See the constants
-	 * X86_BREAKPOINT_LEN_* and X86_BREAKPOINT_RW, etc. */
+	 * of interest ('real_len' - in bytes, 'len' - a constant
+	 * X86_BREAKPOINT_LEN_*) and type of the BP (X86_BREAKPOINT_RW|...) */
 	unsigned long addr;
 	int len;
+	int real_len;
 	int type;
 
 	/* These timers are used to set and clear the HW BPs on the CPUs
@@ -1530,6 +1531,7 @@ RH_MSG_PREFIX "Unable to set a HW BP: all breakpoints are already in use.\n");
 	 * a BP can cover, only one BP will still be set, for simplicity.
 	 * It will cover the area starting from addr. */
 	breakinfo[i].len = find_hwbp_length(addr, len);
+	breakinfo[i].real_len = len;
 	breakinfo[i].type = type;
 	breakinfo[i].max_time = jiffies + max_delay;
 
@@ -1647,7 +1649,7 @@ queue_hwbp_race_report(struct hwbp *hwbp)
 	strncpy(race->comm0, current->comm, TASK_COMM_LEN - 1);
 	memcpy(race->comm1, hwbp->comm, TASK_COMM_LEN);
 	race->addr = hwbp->addr;
-	race->size = hwbp->len;
+	race->size = hwbp->real_len;
 
 	INIT_WORK(&race->work, do_report_race_work);
 	queue_work(wq, &race->work);
