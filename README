@@ -5,11 +5,14 @@ RaceHound can be used to detect data races in the Linux kernel on x86.
 Kernel 3.10 or newer is required, 4.1 or newer is recommended.
 Kprobes, kallsyms and debugfs support should be enabled in the kernel.
 
-The ideas implemented here are similar to how DataCollider tool operates
-on MS Windows.
+The main source code repository of RaceHound, releases and issue tracker
+are available at https://github.com/euspectre/racehound.
 
 # How it works
 ---------------
+
+The ideas implemented here are similar to how DataCollider tool operates
+on MS Windows.
 
 The kernel part of RaceHound (racehound.ko module) monitors the instructions
 in the kernel code in runtime. It operates as follows:
