@@ -275,7 +275,7 @@ For the found races, the corresponding event lines are prefixed with
 "[race]".
 
 An example that demonstrates the usage of this API is also provided:
-https://github.com/winnukem/racehound/blob/master/examples/events.py
+https://github.com/euspectre/racehound/blob/master/examples/events.py
 
 A user-space application may use the information about the events to
 automatically start and stop monitoring the instructions from the list
@@ -283,6 +283,6 @@ according to some policy. This should allow to keep overhead at the
 acceptable level.
 
 An example of such application is provided here:
-https://github.com/winnukem/racehound/blob/master/examples/check_races.py
+https://github.com/euspectre/racehound/blob/master/examples/check_races.py
 
 Note that both events.py and check_races.py need Python 3.4 or newer.
